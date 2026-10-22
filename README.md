@@ -22,6 +22,12 @@ box "Cytoplasm" right_of=m gap=120 shape=ellipse id=c
 connect c -> m "pyruvate"
 ```
 
+![Rnote's own rendering of the generated examples](examples/out/showcase.png)
+
+*Example output, rendered by Rnote's engine: a study note, a hand-placed architecture
+diagram, and Mermaid flowchart, sequence and mindmap diagrams, plus a worksheet laid
+out in millimetres.*
+
 ## Why a separate language?
 
 LLMs are bad at computing coordinates and good at writing simple, regular text. The
