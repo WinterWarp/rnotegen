@@ -341,6 +341,9 @@ class Builder:
         if not s:
             raise ScriptError(line, f"{name}: missing number")
         base = self.doc.page.height if axis == "y" else self.doc.page.width
+        if _ID_RE.match(s) and s not in self.variables():
+            raise ScriptError(line, f"{name}: expected a number like 120, 20mm or 50%, got {s!r}",
+                              f"if {s!r} is meant to be a variable, define it first: let {s} = 100")
         try:
             return evaluate(s, self.variables(), base)
         except ExprError as e:
@@ -625,6 +628,8 @@ class Builder:
         c = col or color or d.text_color
         if op is not None:
             c = c.with_alpha(c.a * op)
+        if sz is not None and sz <= 0:
+            raise ScriptError(o.st.line, f"font size must be positive, got {sz:g}")
         return {
             "font": resolve_family(font) if font else d.font,
             "size": sz or size or d.size,
@@ -1022,6 +1027,8 @@ class Builder:
                 x, y = pts[0][0] - ax, pts[0][1] - ay
             else:
                 x, y, _ = self.place(o, w, h)
+        if w <= 0 or h <= 0:
+            raise ScriptError(st.line, f"rect size must be positive, got {w:g}x{h:g}")
         style = self.style(o, closed=True)
         angle = o.num("rotate", "rotation", "angle", default=0.0)
         r = o.num("radius", "corner_radius", "rounded", "r", default=0.0)
@@ -1088,6 +1095,8 @@ class Builder:
             ry = rx
         if circle:
             ry = rx
+        if rx <= 0 or ry <= 0:
+            raise ScriptError(st.line, f"{st.cmd} radius must be positive, got {rx:g},{ry:g}")
         if center is None:
             v = o.raw("center", "centre", "c")
             if v is not None:
@@ -1270,6 +1279,8 @@ class Builder:
             w = aw
         if h is None:
             h = ah
+        if w <= 0 or h <= 0:
+            raise ScriptError(st.line, f"box size must be positive, got {w:g}x{h:g}")
         x, y, _ = self.place(o, w, h)
         style = self.style(o, closed=True)
         if not o.has("stroke", "color", "line_color", "border", "outline", "stroke_color"):

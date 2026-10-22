@@ -120,9 +120,9 @@ Themes: `default`, `neutral`, `forest`, `blue`, `ink`, `sketch` (hand-drawn), an
 
 rnotegen writes the file format of **Rnote 0.13 and 0.14** (the current releases).
 Newer Rnote versions convert it automatically when the file is opened. Generated
-files are tested by loading and rendering them with the real Rnote engine
-(`rnote-cli` 0.14.2). `--into` appends to files saved by Rnote 0.9 to 0.14,
-including handwritten notes.
+files are tested by loading and rendering them with the real Rnote engine:
+`rnote-cli` 0.14.2 and the 0.15.0 development version. `--into` appends to files
+saved by Rnote 0.9 to 0.14, including handwritten notes.
 
 Text is laid out by Rnote with your installed fonts. When Pillow and fontconfig are
 available, rnotegen measures text with the same fonts, so centering and wrapping
