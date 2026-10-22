@@ -34,10 +34,8 @@ def cmd_build(a, check_only: bool = False) -> int:
     kind = a.format or detect_kind(None if a.input == "-" else a.input, text)
     base_dir = os.path.dirname(os.path.abspath(a.input)) if a.input != "-" else os.getcwd()
     out = None if check_only else (a.output or (a.into if a.into else _default_output(a.input)))
-    res = build(text, kind, out, getattr(a, "preview", None), getattr(a, "into", None), base_dir, **_build_opts(a))
-    if getattr(a, "strict", False) and res.ok and res.warnings:
-        res.ok = False
-        res.errors = ["--strict: warnings are treated as errors"]
+    res = build(text, kind, out, getattr(a, "preview", None), getattr(a, "into", None), base_dir,
+                strict=getattr(a, "strict", False), **_build_opts(a))
     if a.json:
         print(res.to_json())
     else:

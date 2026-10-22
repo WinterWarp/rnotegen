@@ -74,6 +74,8 @@ COMMANDS = {
     "box": "box", "node": "box", "shape": "box",
     "connect": "connect", "link": "connect", "edge": "connect", "connector": "connect",
     "group": "group", "frame": "group",
+    "let": "let", "var": "let", "const": "let", "variable": "let",
+    "repeat": "repeat", "for": "repeat", "loop": "repeat", "times": "repeat",
     # blocks
     "mermaid": "mermaid", "diagram": "mermaid",
     "markdown": "markdown", "md": "markdown",
@@ -81,7 +83,7 @@ COMMANDS = {
     "table": "table", "code": "code", "codeblock": "code",
 }
 
-ALWAYS_BLOCK = {"mermaid", "markdown", "table", "code", "group"}
+ALWAYS_BLOCK = {"mermaid", "markdown", "table", "code", "group", "repeat"}
 BLOCK_IF_NO_STRING = {"text", "para", "quote", "callout"}
 
 _MERMAID_OPENERS = {
@@ -162,27 +164,61 @@ def _read_value(line: str, i: int, lineno: int) -> tuple[Token, int]:
         if j >= len(line):
             raise ScriptError(lineno, f"unclosed {ch} quote", f"close the string with {ch}")
         return Token("".join(buf), True), j + 1
+    # a parenthesized point "(10, 20)" or an expression like "(w-10)*2,40": read to the end of the word
     depth, j = 0, i
     while j < len(line):
-        if line[j] == "(":
+        ch = line[j]
+        if ch == "(":
             depth += 1
-        elif line[j] == ")":
+        elif ch == ")":
             depth -= 1
-            if depth == 0:
-                break
+        elif depth == 0 and ch in " \t":
+            break
         j += 1
-    if j >= len(line):
+    if depth > 0:
         raise ScriptError(lineno, "unclosed '('")
-    return Token(line[i + 1 : j].replace(" ", "").replace("\t", "")), j + 1
+    raw = line[i:j].replace(" ", "").replace("\t", "")
+    # "(10, 20)" is a point: drop the parentheses. "(w - 10)" is an expression: keep them.
+    if raw.startswith("(") and raw.endswith(")") and _single_group(raw) and "," in raw:
+        raw = raw[1:-1]
+    return Token(raw), j
+
+
+def _single_group(s: str) -> bool:
+    """True when s is one parenthesized group: '(a,b)' but not '(a)+(b)'."""
+    depth = 0
+    for k, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and k != len(s) - 1:
+                return False
+    return True
+
+
+_OPS = set("+-*/")
 
 
 def _merge(toks: list[Token]) -> list[Token]:
-    """Join 'key = value', 'key= value', 'key =value', 'x, y' and 'x ,y' into single tokens."""
+    """Join 'key = value', 'key= value', 'key =value', 'x, y' and 'x ,y' into single tokens.
+
+    Inside option values, expressions written with spaces ('at=margin + 2*w, 80')
+    are joined too.
+    """
     out: list[Token] = []
     i = 0
     while i < len(toks):
         t = toks[i]
         prev = out[-1] if out else None
+        if prev is not None and not prev.quoted and not t.quoted and "=" in prev.value and not prev.value.endswith("="):
+            # continuing an expression inside key=value
+            if t.value in _OPS or t.value[0] in "*/+" or prev.value[-1] in _OPS or prev.value[-1] in ",(" \
+                    or t.value[0] in ",)":
+                if not (t.value[0] == "+" and "=" in t.value):
+                    out[-1] = Token(prev.value + t.value, False, prev.is_kv)
+                    i += 1
+                    continue
         if prev is not None and not prev.quoted and not prev.is_kv:
             if not t.quoted and t.value == "=" and i + 1 < len(toks):
                 nxt = toks[i + 1]
@@ -224,7 +260,7 @@ def _parse_lines(lines: list[str], i: int, parent: Stmt | None) -> tuple[list[St
         if not s or s.startswith("#") or s.startswith("//"):
             i += 1
             continue
-        if s.lower() in ("end", "end group", "endgroup", "/group"):
+        if s.lower() in ("end", "end group", "endgroup", "/group", "end repeat", "endrepeat", "/repeat"):
             if parent is not None:
                 return out, i + 1
             raise ScriptError(lineno, "'end' without an open block",
@@ -259,7 +295,7 @@ def _parse_lines(lines: list[str], i: int, parent: Stmt | None) -> tuple[list[St
             is_block = True
         if st.cmd == "svg" and "file" not in st.kw and not any(t.quoted for t in st.pos):
             is_block = True
-        if st.cmd == "group":
+        if st.cmd in ("group", "repeat"):
             st.children, i = _parse_group(lines, i, st)
         elif is_block:
             st.body, st.body_line, i = _read_body(lines, i, st)

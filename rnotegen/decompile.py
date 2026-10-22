@@ -155,7 +155,7 @@ def decompile(path: str, pen: str = "simplify", images: str = "inline", image_di
         elif abs(mm_to_px(h) - page.width) < 1 and abs(mm_to_px(w) - page.height) < 1:
             size = f"{name} orientation=landscape"
     layout = {"fixed_size": "pages", "continuous_vertical": "continuous"}.get(page.layout, page.layout)
-    doc_line = f"document size={size} layout={layout} margin=0"
+    doc_line = f"document size={size} layout={layout}"
     if page.pattern != "none":
         doc_line += f" pattern={page.pattern} pattern_color={page.pattern_color.to_spec()} pattern_size={_n(page.pattern_size)}"
     if page.background.to_spec() != "#ffffff":

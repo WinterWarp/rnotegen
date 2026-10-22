@@ -102,6 +102,7 @@ class FlowParser:
         self.class_defs: dict[str, dict] = {}
         self.link_styles: dict[int | str, dict] = {}
         self.sub_ids: dict[str, FSub] = {}
+        self.warnings: list[str] = []
 
     # -- nodes
     def touch(self, nid: str, label: str | None = None, kind: str | None = None, classes=None):
@@ -198,7 +199,10 @@ class FlowParser:
             for k in re.split(r"\s*,\s*", m.group(1).strip()):
                 self.link_styles[int(k) if k.isdigit() else k] = css
             return
-        if re.match(r"^(click|accTitle|accDescr|title)\b", st):
+        if re.match(r"^(accTitle|accDescr|title)\b", st) or (
+                re.match(r"^click\s", st) and not re.search(r"--|==|-\.|~~~|&", st)):
+            if st.startswith("click"):
+                self.warnings.append(f"line {lineno}: 'click' interactions are ignored in Rnote")
             return
         self.chain(st, lineno)
 
@@ -465,7 +469,7 @@ def render(src: Source, opts: Options) -> Diagram:
         return GCluster(s.id, s.title, list(s.nodes), [conv(x) for x in s.subs], s.direction)
 
     els, bb, _ = render_graph(nodes, edges, list(p.root.nodes), [conv(s) for s in p.root.subs], direction, opts)
-    return Diagram(els, bb, "flowchart", src.title)
+    return Diagram(els, bb, "flowchart", src.title, warnings=p.warnings)
 
 
 def _gnode(nid: str, kind: str, label: str, w: float, h: float, style: Style, spec, tw: float) -> GNode:

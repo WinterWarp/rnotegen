@@ -19,17 +19,21 @@ COMMAND [values...] [key=value ...] [flags ...]
 ```
 
 - One command per line. A line ending in `\` continues on the next line.
-- Strings use double quotes: `"Hello"`. Escapes: `\n` (new line), `\"`.
-- Points are `x,y`, e.g. `120,80` or `(120, 80)`. Sizes are `WxH`, e.g. `200x80`.
+- Strings use double quotes: `"Hello"`. Escapes: `\n` (new line), `\"`, `\\`.
+- Points are `x,y`, e.g. `120,80` or `(120, 80)`. Sizes are `WxH`, e.g. `200x80`
+  or `50mmx30mm`.
 - Units: pixels by default. Also `mm`, `cm`, `in`, `pt`, and `%` of the page
   width (x) or height (y): `at=20mm,30mm`, `at=50%,10%`.
+- Numbers can be arithmetic: `at=margin + 3*colw, 80`, `size=(colw - 8)x600`
+  (see section 3, "Variables and loops").
 - Colors: CSS names (`red`, `steelblue`), `#rgb`, `#rrggbb`, `#rrggbbaa`,
   `rgb(255,0,0)`, `name/alpha` (`red/0.3`), and `none`.
 - Flags are bare words: `bold`, `dashed`, `rough`. `bold=on` and `bold=off` also work.
 - Unknown options are reported as warnings with a "did you mean" hint.
 
 **Coordinates:** origin (0,0) is the top-left corner of page 1. x grows right, y grows down.
-An A4 page is 794 x 1123 px; US letter is 816 x 1056. The default margin is 56 px.
+An A4 page is 794 x 1123 px (landscape: 1123 x 794); US letter is 816 x 1056.
+The default margin is 56 px. Build reports always give positions in px.
 
 **Block commands** take the following lines as their body, up to a line that
 contains only `end`. These are `mermaid`, `markdown`, `table`, `code`, `group`,
@@ -68,7 +72,8 @@ content that follows does not overlap them (unless `float`).
 
 **Pages:** `page 2` moves to the top of page 2; from then on, explicit
 coordinates are relative to page 2's top-left corner. `newpage` starts a new
-page in the flow. `space 30` adds vertical space.
+page in the flow, and coordinates become relative to that page too. Automatic
+page breaks do not change the origin. `space 30` adds vertical space.
 
 ## 3. Commands
 
@@ -144,12 +149,15 @@ arrow 100,200 300,200                     # arrow head at the end
 arrow 100,200 200,250 300,200 both        # heads at both ends
 line 100,250 300,250 head=triangle tail=circle
 polygon 100,300 200,300 150,380 fill=pink
-curve 100,400 200,320 300,400             # quadratic: start, control, end
+curve 100,400 200,320 300,400             # quadratic: start, control, end (peak at y=360)
 bezier 100,450 150,380 250,520 300,450    # cubic: start, c1, c2, end
 pen 100,500 120,510 140,505 160,520 smooth color=blue width=3   # freehand stroke
 highlight 100,540 300,540                 # translucent highlighter (yellow by default)
 ```
 
+A quadratic `curve` passes halfway between its control point and the middle
+of start/end. For a parabola from A to B with its peak at height P, use the
+control point `x_mid, 2*P - (A_y + B_y)/2`.
 `label=` on `rect`, `ellipse`, `circle` and `polygon` puts centered text
 inside; it takes the text options `text_color=`, `font_size=`, `bold`,
 `italic`, `font=`. Line-like commands (`line arrow curve bezier pen`) take
@@ -211,9 +219,31 @@ group at=400,600 id=legend
 end
 ```
 
-Inside `group at=X,Y`, coordinates are relative to X,Y. Without `at=`, the
-group is placed in the flow (use `align=center` to center it). The group's id
+Inside `group at=X,Y`, coordinates are relative to X,Y. Without `at=`, write
+the children as if the group's top-left corner were 0,0. The whole group is
+then placed in the flow (use `align=center` to center it). The group's id
 refers to its bounding box.
+
+### Variables and loops
+
+```
+let colw = (page_width - 2*margin) / 7      # define a number (units and expressions allowed)
+repeat 7 i                                  # i = 0, 1, ..., 6
+  rect at=margin + i*colw, 80 size=(colw - 8)x600 id=col{i}
+  text "Day {i+1}" center=margin + i*colw + colw/2, 100 bold
+end
+repeat 3 n from=1                           # n = 1, 2, 3
+  bullet "Point {n}"
+end
+```
+
+- Numbers anywhere can use `+ - * /`, parentheses, units and variable names.
+  Built-in names: `page_width`, `page_height`, `margin`, `content_width`.
+- `{expression}` inside strings and option values is replaced by its value,
+  e.g. `"Day {i+1}"` or `id=col{i}`. Braces that don't contain a valid
+  expression stay as they are.
+- `repeat N [name]`: repeats the indented commands up to `end`. Options:
+  `from=` (start value, default 0), `step=` (default 1).
 
 ### Diagrams, Markdown, tables, code, images
 
@@ -273,7 +303,20 @@ end
 - `table`: Markdown pipe-table rows; `header=off` makes the first row plain.
   Long tables continue on the next page with the header repeated.
 
-## 4. Tips for reliable results
+## 4. Editing existing notes
+
+- To **add** content to an existing note (even a handwritten one), write a
+  script with just the new content and build it with
+  `rnotegen build new.rns --into existing.rnote -o result.rnote`. Flow
+  content starts below the existing content, and nothing existing changes.
+- To **change** existing content, use `rnotegen decompile existing.rnote -o
+  existing.rns`. You get every stroke as a flat command with absolute
+  coordinates: text, shapes, simplified pen strokes. Former headings, lists,
+  tables and diagrams appear as their individual texts, lines and rectangles.
+  Edit the commands, for example the text of one item, and build again.
+  Commands added at the end flow below the existing content.
+
+## 5. Tips for reliable results
 
 1. Prefer the flow for documents: headings, `para`, bullets, `mermaid` and
    `markdown` need no coordinates at all.
@@ -287,8 +330,10 @@ end
 5. Read the warnings after each build. They tell you which line overlaps or
    overflows.
 6. Images are always drawn below strokes and text (Rnote's layer order).
+7. For repeated structures (columns, grids, rows of boxes), use `let` and
+   `repeat` instead of computing every coordinate by hand.
 
-## 5. Complete example
+## 6. Complete example
 
 ```
 document size=a4 layout=pages pattern=dots

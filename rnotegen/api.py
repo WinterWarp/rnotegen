@@ -95,7 +95,7 @@ def _page_overrides(page: PageSetup, opts: dict) -> None:
 
 
 def build(source: str, kind: str = "script", output: str | None = None, preview: str | None = None,
-          into: str | None = None, base_dir: str = ".", **opts) -> BuildResult:
+          into: str | None = None, base_dir: str = ".", strict: bool = False, **opts) -> BuildResult:
     """Build a .rnote file from a script, Markdown or Mermaid source.
 
     opts: theme, rough, curved, direction (mermaid); page_size, layout, landscape (markdown / mermaid);
@@ -136,6 +136,10 @@ def build(source: str, kind: str = "script", output: str | None = None, preview:
     res = BuildResult(True, warnings=list(b.warnings), ids=b.id_report(), document=doc)
     res.strokes = len(doc.elements)
     res.pages = doc.page_count()
+    if strict and res.warnings:
+        res.ok = False
+        res.errors = ["strict mode: warnings are treated as errors"]
+        return res
     seed = int(opts.get("seed") or 0)
     if output:
         if existing is not None:

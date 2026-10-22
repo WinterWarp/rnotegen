@@ -18,6 +18,7 @@ from .diagram import (
     normalize_kind, path_midpoint, rounded_rect_pts,
 )
 from .dsl import ScriptError, Stmt, Token, parse_script
+from .expr import ExprError, evaluate, interpolate, split_size, split_top
 from .markdown import Op, parse_markdown
 from .markup import parse_inline
 from .model import (
@@ -216,6 +217,7 @@ class Builder:
         self.start_y: float | None = None  # where flow content starts (used when appending to a file)
         self.cur_line = 0
         self.shape_entries: list[Entry] = []
+        self.vars: dict[str, float] = {}
         self.ctx: Ctx = self._top_ctx()
         self._adapt_to_background()
         self.ctx_stack: list[Ctx] = []
@@ -297,6 +299,8 @@ class Builder:
         if handler is None:
             self.errors.append(ScriptError(st.line, f"command '{st.cmd}' is not implemented"))
             return
+        if self.vars:
+            st = self._interpolated(st)
         o = Opts(st, self)
         self.cur_line = st.line
         try:
@@ -307,23 +311,52 @@ class Builder:
         except (ColorError, ValueError) as e:
             self.errors.append(ScriptError(st.line, str(e)))
 
+    def variables(self) -> dict[str, float]:
+        p = self.doc.page
+        builtins = {"page_width": p.width, "page_height": p.height, "margin": p.margin,
+                    "content_width": p.width - 2 * p.margin}
+        return {**builtins, **self.vars}
+
+    def _interpolated(self, st: Stmt) -> Stmt:
+        """Copy of st with {expr} replaced in strings and option values (inside repeat / after let)."""
+        v = self.variables()
+        out = Stmt(st.cmd, st.line, [Token(interpolate(t.value, v), t.quoted, t.is_kv) for t in st.pos],
+                   {k: Token(interpolate(t.value, v), t.quoted, t.is_kv) for k, t in st.kw.items()},
+                   dict(st.kw_lines), st.body, st.body_line, st.children, st.raw)
+        if st.body is not None and st.cmd in ("text", "para", "quote", "callout"):
+            out.body = [interpolate(l, v) for l in st.body]
+        return out
+
     def length(self, v: str, line: int, axis: str | None = None, name: str = "value") -> float:
-        m = _LEN_RE.match(v.strip())
-        if not m:
-            raise ScriptError(line, f"{name}: expected a number like 120, 20mm or 50%, got {v!r}")
-        num = float(m.group(1))
-        unit = (m.group(2) or "px").lower()
-        if unit == "%":
-            base = self.doc.page.height if axis == "y" else self.doc.page.width
-            return num / 100.0 * base
-        return num * UNITS[unit]
+        """A number with an optional unit, or an expression like 20mm + 3*colw."""
+        s = v.strip()
+        m = _LEN_RE.match(s)
+        if m:
+            num = float(m.group(1))
+            unit = (m.group(2) or "px").lower()
+            if unit == "%":
+                base = self.doc.page.height if axis == "y" else self.doc.page.width
+                return num / 100.0 * base
+            return num * UNITS[unit]
+        if not s:
+            raise ScriptError(line, f"{name}: missing number")
+        base = self.doc.page.height if axis == "y" else self.doc.page.width
+        try:
+            return evaluate(s, self.variables(), base)
+        except ExprError as e:
+            raise ScriptError(line, f"{name}: {e}",
+                              "numbers look like 120, 20mm, 50% or an expression like 40+2*colw (define names with let)")
+
+    def _is_length(self, v: str, line: int) -> bool:
+        try:
+            self.length(v, line)
+            return True
+        except ScriptError:
+            return False
 
     def point(self, v: str, line: int, name: str = "point") -> Point:
         """Parse 'x,y' (relative to the current origin) or 'id.anchor[+dx,dy]' (absolute)."""
         s = v.strip()
-        parts = s.split(",")
-        if len(parts) == 2 and _LEN_RE.match(parts[0].strip() or "x") and _LEN_RE.match(parts[1].strip() or "x"):
-            return (self.ctx.ox + self.length(parts[0], line, "x", name), self.ctx.oy + self.length(parts[1], line, "y", name))
         m = _REF_RE.match(s)
         if m and m.group(1) in self.ids:
             ent = self.ids[m.group(1)]
@@ -336,12 +369,19 @@ class Builder:
                                   "use one of: topleft top topright left center right bottomleft bottom bottomright")
             if m.group(3):
                 # the sign belongs to dx only: a.bottom-70,20 means dx=-70, dy=+20
-                off = (m.group(3) + m.group(4)).split(",")
+                off = split_top(m.group(3) + m.group(4), ",")
                 if len(off) != 2:
                     raise ScriptError(line, f"bad offset in {s!r}; write it like {m.group(1)}.{anchor}+10,20 or {m.group(1)}.{anchor}-10,-20")
                 p = (p[0] + self.length(off[0], line, "x"), p[1] + self.length(off[1], line, "y"))
             return p
-        if m:
+        parts = split_top(s, ",")
+        if len(parts) == 2:
+            try:
+                return (self.ctx.ox + self.length(parts[0], line, "x", name), self.ctx.oy + self.length(parts[1], line, "y", name))
+            except ScriptError:
+                if not (m and m.group(1) not in self.vars and m.group(1) not in self.variables()):
+                    raise
+        if m and m.group(1) not in self.variables():
             near = difflib.get_close_matches(m.group(1), list(self.ids), n=1)
             hint = f"did you mean '{near[0]}'?" if near else (
                 "ids must be defined (id=...) before they are used" if self.ids else "no element has an id yet; add id=name to an element first")
@@ -351,8 +391,8 @@ class Builder:
     def points(self, toks: list[str], line: int) -> list[Point]:
         out = []
         for t in toks:
-            parts = t.split(",")
-            if len(parts) > 2 and len(parts) % 2 == 0 and all(_LEN_RE.match(p.strip() or "x") for p in parts):
+            parts = split_top(t, ",")
+            if len(parts) > 2 and len(parts) % 2 == 0 and all(self._is_length(p, line) for p in parts):
                 for k in range(0, len(parts), 2):
                     out.append(self.point(parts[k] + "," + parts[k + 1], line))
             else:
@@ -360,14 +400,13 @@ class Builder:
         return out
 
     def size(self, v: str, line: int, name: str = "size") -> tuple[float, float]:
-        m = _SIZE_RE.match(v.strip())
-        if not m:
-            n = _LEN_RE.match(v.strip())
-            if n:
+        sp = split_size(v.strip())
+        if sp is None:
+            if self._is_length(v, line):
                 s = self.length(v, line, None, name)
                 return s, s
-            raise ScriptError(line, f"{name}: expected WxH like 200x80, got {v!r}")
-        return self.length(m.group(1), line, "x", name), self.length(m.group(2), line, "y", name)
+            raise ScriptError(line, f"{name}: expected WxH like 200x80 or (w-10)x80, got {v!r}")
+        return self.length(sp[0], line, "x", name), self.length(sp[1], line, "y", name)
 
     def emit(self, st: Stmt, els: list[Element], o: Opts | None = None, flow: bool = False,
              shape: tuple | None = None, register: bool = True) -> Entry:
@@ -571,7 +610,7 @@ class Builder:
         d = self.d
         font = o.raw("font", "font_family", "family")
         size_tok = o.st.kw.get("size")
-        if size_tok is not None and _SIZE_RE.match(size_tok.value.strip()):
+        if size_tok is not None and split_size(size_tok.value.strip()) is not None:
             sz = o.num("font_size", "fontsize", "text_size")  # size=WxH is a box size, not a font size
         else:
             sz = o.num("size", "font_size", "fontsize", "text_size")
@@ -951,7 +990,7 @@ class Builder:
         words = o.words()
         pts, sizes = [], []
         for i, t in words:
-            if _SIZE_RE.match(t):
+            if split_size(t) is not None:
                 sizes.append(self.size(t, st.line))
                 o.used_pos.add(i)
             elif "," in t or _REF_RE.match(t) and t.split(".")[0].split("+")[0] in self.ids:
@@ -1003,7 +1042,7 @@ class Builder:
         rx = ry = None
         nums = []
         for i, t in words:
-            if _SIZE_RE.match(t):
+            if split_size(t) is not None:
                 w, h = self.size(t, st.line)
                 rx, ry = w / 2, h / 2
                 o.used_pos.add(i)
@@ -1014,7 +1053,7 @@ class Builder:
                 a, b = t.split(",", 1)
                 rx, ry = self.length(a, st.line), self.length(b, st.line)
                 o.used_pos.add(i)
-            elif _LEN_RE.match(t):
+            elif self._is_length(t, st.line):
                 nums.append(self.length(t, st.line))
                 o.used_pos.add(i)
             elif _REF_RE.match(t) and t.split(".")[0] in self.ids and center is None:
@@ -1210,10 +1249,10 @@ class Builder:
         wrap = o.num("wrap", "max_text_width", default=220.0)
         sz = o.raw("size", "dims")
         w = h = None
-        if sz is not None and _SIZE_RE.match(sz):
+        if sz is not None and split_size(sz) is not None:
             w, h = self.size(sz, st.line)
         for i, t in o.words():
-            if _SIZE_RE.match(t):
+            if split_size(t) is not None:
                 w, h = self.size(t, st.line)
                 o.used_pos.add(i)
         w = o.num("width", "w", default=w, axis="x")
@@ -1395,6 +1434,50 @@ class Builder:
             return [p0, (p1[0], p0[1]), p1]
         return [p0, (p0[0], p1[1]), p1]
 
+    def cmd_let(self, st: Stmt, o: Opts) -> None:
+        if not st.kw:
+            raise ScriptError(st.line, "let needs a name and a value", "write: let colw = 150   (then use colw in numbers)")
+        for k, tok in st.kw.items():
+            o.used.add(k)
+            if not _ID_RE.match(k):
+                raise ScriptError(st.line, f"invalid variable name {k!r}")
+            self.vars[k] = self.length(tok.value, st.line, None, k)
+
+    def cmd_repeat(self, st: Stmt, o: Opts) -> None:
+        words = o.words()
+        if not words and not o.has("count", "times", "n"):
+            raise ScriptError(st.line, "repeat needs a count", "write: repeat 5 i   ...   end   (i counts 0,1,2,...)")
+        count_s = o.raw("count", "times", "n")
+        name = o.raw("var", "as", "name")
+        rest = []
+        for i, t in words:
+            o.used_pos.add(i)
+            if count_s is None:
+                count_s = t
+            elif name is None and _ID_RE.match(t):
+                name = t
+            else:
+                rest.append(t)
+        if rest:
+            raise ScriptError(st.line, f"repeat: unexpected {' '.join(rest)!r}", "write: repeat 5 i")
+        count = int(round(self.length(count_s, st.line, None, "count")))
+        if count < 0 or count > 5000:
+            raise ScriptError(st.line, f"repeat count must be between 0 and 5000, got {count}")
+        name = name or "i"
+        start = o.num("from", "start", default=0.0)
+        step = o.num("step", "by", default=1.0)
+        saved = self.vars.get(name)
+        try:
+            for k in range(count):
+                self.vars[name] = start + k * step
+                for child in st.children or []:
+                    self._exec(child)
+        finally:
+            if saved is None:
+                self.vars.pop(name, None)
+            else:
+                self.vars[name] = saved
+
     def cmd_group(self, st: Stmt, o: Opts) -> None:
         explicit_at = o.raw("at", "origin", "pos")
         width = o.num("width", "w", axis="x")
@@ -1483,9 +1566,16 @@ class Builder:
             if not explicit and not o.has("scale", "zoom") and left < h * scale <= left / 0.75 and not self.at_page_top():
                 scale = left / h  # shrink a little rather than leave a big gap
                 self.warn(st.line, f"diagram shrunk to {scale:.0%} to fit the rest of the page (set height= or scale= to control)")
+        for w in dg.warnings:
+            self.warn(st.body_line, f"mermaid: {w}")
         if scale < 0.6:
-            self.warn(st.line, f"diagram drawn at {scale:.0%} of its natural size; text may be small "
-                               "(try direction=TB, fewer/shorter labels, or a landscape page)")
+            first = next((l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("%%")), "")
+            hint = "fewer or shorter labels, a smaller wrap=, or a landscape page"
+            if re.match(r"^(flowchart|graph)\s+(LR|RL)", first, re.I) and w > h:
+                hint = "direction=TB (the diagram is wide), " + hint
+            elif h > w * 1.3 and re.match(r"^(flowchart|graph)", first, re.I):
+                hint = "direction=LR (the diagram is tall), " + hint
+            self.warn(st.line, f"diagram drawn at {scale:.0%} of its natural size; text may be small (try {hint})")
         x, y, _ = self.place(o, w * scale, h * scale, align="center")
         for e in dg.elements:
             e.transform(scale, x, y)
@@ -1650,16 +1740,27 @@ class Builder:
         avail = (o.num("width", "w", default=None) if o else None) or c.col_w
         widths = list(nat)
         if sum(widths) > avail:
-            # shrink the widest columns first, keep a sensible minimum
-            minw = 60.0
-            while sum(widths) > avail + 0.5:
-                k = max(range(ncol), key=lambda j: widths[j])
+            # never narrower than the longest word in the column (no words split in the middle)
+            minw = [0.0] * ncol
+            for r, row in enumerate(rows):
+                sp = hspec if (header and r == 0) else spec
+                for k, cell in enumerate(row):
+                    for word in cell.split():
+                        el = self.make_text(word, 0, 0, sp, None)
+                        minw[k] = max(minw[k], el.measure()[0] + 2 * pad)
+            minw = [min(m, avail * 0.4) for m in minw]
+            # shrink the widest shrinkable column step by step
+            for _ in range(200):
                 excess = sum(widths) - avail
-                others = sorted(widths, reverse=True)
-                target = others[1] if len(others) > 1 and others[1] < widths[k] else widths[k] - excess
-                widths[k] = max(minw, max(target, widths[k] - excess))
-                if all(w <= minw + 0.01 for w in widths):
+                if excess <= 0.5:
                     break
+                cand = [j for j in range(ncol) if widths[j] > minw[j] + 0.5]
+                if not cand:
+                    break
+                k = max(cand, key=lambda j: widths[j])
+                others = sorted((widths[j] for j in cand if j != k), reverse=True)
+                target = max(minw[k], widths[k] - excess, others[0] if others and others[0] < widths[k] else 0.0)
+                widths[k] = target if target < widths[k] else max(minw[k], widths[k] - excess)
         total_w = sum(widths)
         border = parse_color("#b8bfcc")
         head_fill = parse_color("#eef1f6")
@@ -1669,7 +1770,8 @@ class Builder:
             els = []
             hmax = size * LINE_HEIGHT
             for k, cell in enumerate(row):
-                el = self.make_text(cell, 0, 0, hspec if (header and r == 0) else spec, widths[k] - 2 * pad)
+                # small slack so a cell measured to fit is never wrapped by rounding
+                el = self.make_text(cell, 0, 0, hspec if (header and r == 0) else spec, widths[k] - 2 * pad + 3)
                 w_, h_, _ = el.measure()
                 els.append((el, w_))
                 hmax = max(hmax, h_)
@@ -1851,13 +1953,17 @@ class Builder:
             if n_ov >= 8:
                 break
         texts = [e for e in els if isinstance(e, TextEl)]
+        tboxes = [t.bbox() for t in texts]
+        order = sorted(range(len(texts)), key=lambda k: tboxes[k].y0)
         n = 0
-        for i in range(len(texts)):
-            bi = texts[i].bbox()
-            for j in range(i + 1, len(texts)):
+        for oi, i in enumerate(order):
+            bi = tboxes[i]
+            for j in order[oi + 1:]:
+                bj = tboxes[j]
+                if bj.y0 >= bi.y1:
+                    break  # sorted by top edge: nothing further down can overlap
                 if self.src_line.get(id(texts[i])) == self.src_line.get(id(texts[j])):
                     continue
-                bj = texts[j].bbox()
                 if bi.intersects(bj):
                     ix = min(bi.x1, bj.x1) - max(bi.x0, bj.x0)
                     iy = min(bi.y1, bj.y1) - max(bi.y0, bj.y0)
