@@ -1,0 +1,39 @@
+# A study note written entirely in flow mode: no coordinates needed.
+document size=a4 layout=pages pattern=dots
+defaults size=16
+
+h1 "The Krebs Cycle" rule
+para "The citric acid cycle oxidizes **acetyl-CoA** to CO₂ and captures the energy as *NADH*, *FADH₂* and GTP. It runs in the **mitochondrial matrix**."
+
+h2 "Key facts"
+bullet "Takes place twice per glucose molecule"
+bullet "Each turn produces 3 NADH, 1 FADH₂ and 1 GTP"
+bullet "Oxaloacetate is regenerated at the end"
+bullet "it's a cycle, not a pathway" level=2
+
+h2 "Overview"
+mermaid
+flowchart TD
+  G[Glycolysis] -->|2 pyruvate| K(Krebs cycle)
+  K -->|3 NADH, 1 FADH2| E(Electron transport chain)
+  K -->|1 GTP| ATP((ATP))
+  E -->|~34 ATP| ATP
+  K -->|2 CO2| X[Exhaled]
+end
+
+h2 "Yield per turn"
+table
+| Product | Count | Where it goes |
+|---------|:-----:|---------------|
+| NADH    | 3     | Electron transport chain |
+| FADH₂   | 1     | Electron transport chain |
+| GTP     | 1     | Converted to ATP |
+| CO₂     | 2     | Exhaled |
+end
+
+callout "Mnemonic: **C**an **I** **K**eep **S**elling **S**ex **F**or **M**oney, **O**fficer?" title="Remember the order"
+
+h2 "To review"
+todo "Draw the cycle from memory" done
+todo "Learn the enzyme names"
+todo "Connect to the electron transport chain"

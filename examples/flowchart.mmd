@@ -1,0 +1,16 @@
+---
+title: Should I write a test?
+---
+flowchart TD
+    A([New code]) --> B{Is it logic?}
+    B -->|yes| C{Is it hard to get right?}
+    B -->|no| D[Skip the test]
+    C -->|yes| E[Write a unit test]
+    C -->|no| F{Did it break before?}
+    F -->|yes| E
+    F -->|no| D
+    E --> G[(CI)]
+    subgraph Review
+        G --> H[Code review]
+    end
+    D --> H

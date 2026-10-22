@@ -68,6 +68,20 @@ def _parse(s: str, out: list[str], spans: list[Span], link_color: Color | None) 
             out.append(s[i + 1])
             i += 2
             continue
+        if c in "*_~":
+            run = 1
+            while i + run < n and s[i + run] == c:
+                run += 1
+            if run == 3 and c in "*_" and i + 3 < n and not s[i + 3].isspace():
+                close = s.find(c * 3, i + 3)
+                if close > i + 3 and not s[close - 1].isspace():
+                    _wrap(s[i + 3 : close], out, spans, link_color, bold=True, italic=True)
+                    i = close + 3
+                    continue
+            if run >= 3:  # '___' or '***' fill-in lines stay literal
+                out.extend(s[i : i + run])
+                i += run
+                continue
         if c == "`":
             close = s.find("`", i + 1)
             if close > i + 1:

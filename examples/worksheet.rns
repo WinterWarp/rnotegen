@@ -1,0 +1,40 @@
+# A two-page worksheet with exact physical positions (mm units).
+document size=a4 layout=pages margin=20mm
+
+text "Fractions: Worksheet 3" at=20mm,18mm size=26 bold
+text "Name: ______________________     Date: ____________" at=20mm,32mm size=14
+
+# Question 1: a circle split into quarters
+text "1. Shade 3/4 of the circle." at=20mm,50mm size=16
+circle center=55mm,85mm radius=25mm stroke_width=2 id=pie
+line pie.top pie.bottom stroke=gray
+line pie.left pie.right stroke=gray
+
+# Question 2: a bar split into thirds, one third shaded
+text "2. Which fraction is shaded?" at=110mm,50mm size=16
+rect at=110mm,70mm size=25mmx15mm fill=#9ec5fe
+rect at=135mm,70mm size=25mmx15mm
+rect at=160mm,70mm size=25mmx15mm
+text "Answer: ________" at=110mm,95mm size=16
+
+# Question 3: a number line
+text "3. Mark 1/2 and 3/4 on the number line." at=20mm,125mm size=16
+line 25mm,145mm 185mm,145mm stroke_width=2 head=arrow
+line 25mm,140mm 25mm,150mm
+line 185mm,140mm 185mm,150mm
+text "0" center=25mm,155mm
+text "1" center=185mm,155mm
+
+# Answer lines
+text "4. Explain why 2/4 = 1/2." at=20mm,175mm size=16
+line 20mm,195mm 190mm,195mm stroke=#bbbbbb stroke_width=1
+line 20mm,210mm 190mm,210mm stroke=#bbbbbb stroke_width=1
+line 20mm,225mm 190mm,225mm stroke=#bbbbbb stroke_width=1
+
+page 2
+text "Answers (for the teacher)" at=20mm,18mm size=22 bold
+text "1. Three of the four quarters are shaded." at=20mm,35mm
+text "2. 1/3" at=20mm,45mm
+text "3. 1/2 is in the middle; 3/4 is three quarters of the way." at=20mm,55mm
+text "4. Both describe the same amount: two of four equal parts = one of two equal parts." \
+     at=20mm,65mm width=160mm

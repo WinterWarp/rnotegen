@@ -1,0 +1,36 @@
+# A hand-placed diagram: exact positions, ids, relative placement and connectors.
+document size=a4 orientation=landscape layout=pages pattern=grid pattern_color=#eef2f8
+
+text "Web shop architecture" center=561,50 size=28 bold
+text "*sketch, not to scale*" center=561,85 size=14 color=gray
+
+box "Browser" at=80,180 size=150x60 shape=round fill=#e3efff id=browser
+box "CDN" right_of=browser gap=90 shape=round fill=#e3efff id=cdn
+box "API gateway" right_of=cdn gap=90 fill=#fff3c4 id=gw
+box "Orders service" at=gw.bottomleft-60,90 fill=#d7f5d0 id=orders
+box "Users service" right_of=orders gap=40 fill=#d7f5d0 id=users
+box "Postgres" below=orders gap=70 shape=cylinder fill=#f0e0ff id=db
+box "Redis" below=users gap=70 shape=cylinder fill=#ffe0e0 id=cache
+
+connect browser -> cdn "static files"
+connect cdn -> gw "/api"
+connect gw -> orders route=elbow
+connect gw -> users route=elbow
+connect orders -> db
+connect users -> cache
+connect users -> db dashed "reads"
+
+callout "All services run in one Kubernetes cluster. The gateway handles auth and rate limiting." title="Notes" at=80,330 width=300
+
+group at=870,560 id=legend
+  rect 0,0 190x110 stroke=#999 fill=white
+  text "Legend" at=12,8 bold
+  rect 12,40 18x14 fill=#e3efff stroke=#3b4a7a
+  text "client side" at=40,37 size=14
+  rect 12,64 18x14 fill=#d7f5d0 stroke=#3b4a7a
+  text "service" at=40,61 size=14
+  line 12,93 30,93 dashed
+  text "read only" at=40,84 size=14
+end
+
+highlight gw.bottomleft+0,6 gw.bottomright+0,6

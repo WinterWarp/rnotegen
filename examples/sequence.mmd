@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant A as App
+    participant S as Server
+    U->>A: Tap "Sync"
+    A->>+S: GET /changes?since=42
+    S-->>-A: 3 changes
+    loop for each change
+        A->>A: Apply locally
+    end
+    alt conflict
+        A->>U: Ask which version to keep
+    else no conflict
+        A-->>U: Done
+    end
+    Note over A,S: Changes are signed
