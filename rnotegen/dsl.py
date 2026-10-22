@@ -81,10 +81,11 @@ COMMANDS = {
     "markdown": "markdown", "md": "markdown",
     "svg": "svg", "image": "image", "img": "image", "picture": "image", "png": "image",
     "table": "table", "code": "code", "codeblock": "code",
+    "math": "math", "tex": "math", "latex": "math", "equation": "math", "formula": "math",
 }
 
 ALWAYS_BLOCK = {"mermaid", "markdown", "table", "code", "group", "repeat"}
-BLOCK_IF_NO_STRING = {"text", "para", "quote", "callout"}
+BLOCK_IF_NO_STRING = {"text", "para", "quote", "callout", "math"}
 
 _MERMAID_OPENERS = {
     "flowchart": ("subgraph",), "graph": ("subgraph",),
@@ -114,7 +115,8 @@ def _strip_comment(line: str) -> str:
     return line
 
 
-def tokenize(line: str, lineno: int) -> list[Token]:
+def tokenize(line: str, lineno: int, raw_strings: bool = False) -> list[Token]:
+    """raw_strings: backslashes in quoted strings stay as written (TeX), except before the closing quote."""
     toks: list[Token] = []
     i, n = 0, len(line)
     while i < n:
@@ -123,7 +125,7 @@ def tokenize(line: str, lineno: int) -> list[Token]:
             i += 1
             continue
         if ch in "\"'(":
-            tok, i = _read_value(line, i, lineno)
+            tok, i = _read_value(line, i, lineno, raw_strings)
             toks.append(tok)
             continue
         j = i
@@ -132,7 +134,7 @@ def tokenize(line: str, lineno: int) -> list[Token]:
                 break
             j += 1
         if j < n and line[j] == "=":
-            val, i = _read_value(line, j + 1, lineno)
+            val, i = _read_value(line, j + 1, lineno, raw_strings)
             toks.append(Token(line[_word_start(line, j) : j] + "=" + val.value, val.quoted, True))
             continue
         toks.append(Token(line[i:j]))
@@ -147,7 +149,7 @@ def _word_start(line: str, j: int) -> int:
     return k
 
 
-def _read_value(line: str, i: int, lineno: int) -> tuple[Token, int]:
+def _read_value(line: str, i: int, lineno: int, raw: bool = False) -> tuple[Token, int]:
     """Read a quoted string or a parenthesized group starting at line[i]."""
     ch = line[i]
     if ch in "\"'":
@@ -156,7 +158,10 @@ def _read_value(line: str, i: int, lineno: int) -> tuple[Token, int]:
         while j < len(line) and line[j] != ch:
             if line[j] == "\\" and j + 1 < len(line):
                 nxt = line[j + 1]
-                buf.append({"n": "\n", "t": "\t", "\\": "\\", '"': '"', "'": "'"}.get(nxt, "\\" + nxt))
+                if raw:
+                    buf.append(nxt if nxt == ch else "\\" + nxt)
+                else:
+                    buf.append({"n": "\n", "t": "\t", "\\": "\\", '"': '"', "'": "'"}.get(nxt, "\\" + nxt))
                 j += 2
                 continue
             buf.append(line[j])
@@ -270,7 +275,9 @@ def _parse_lines(lines: list[str], i: int, parent: Stmt | None) -> tuple[list[St
             i += 1
             s = s[:-1].rstrip() + " " + lines[i].strip()
         s = _strip_comment(s)
-        toks = tokenize(s, lineno)
+        first = re.match(r"[A-Za-z_][\w-]*", s)
+        tex = first is not None and COMMANDS.get(first.group(0).lower().replace("-", "_")) == "math"
+        toks = tokenize(s, lineno, raw_strings=tex)
         if not toks:
             i += 1
             continue

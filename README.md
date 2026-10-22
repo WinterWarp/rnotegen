@@ -6,7 +6,8 @@ and **Markdown**.
 
 Everything rnotegen produces is native Rnote content: text, shapes, arrows and pen
 strokes that you can select, move and edit in Rnote like anything you drew yourself.
-It does not paste pictures.
+It only adds pictures where you ask for them: images, SVG files and typeset math,
+which become Rnote vector images.
 
 ```
 h1 "Cellular respiration" rule
@@ -37,12 +38,18 @@ script is designed for that:
   options produce warnings with "did you mean" hints instead of failing.
 - **No coordinates needed for documents.** Flow placement stacks headings,
   paragraphs, lists, tables and diagrams down the page and breaks pages
-  automatically.
+  automatically. Headings move to the next page with the block that follows
+  them, and `group min_height=` keeps a worksheet problem and its answer space
+  on one page.
 - **Exact positions when you want them.** Use `at=x,y`, `center=`, `anchor=`, units
   (`mm`, `cm`, `in`, `pt`, `%`), page-relative coordinates (`page 2`), named
   elements with anchors and offsets (`title.bottom+0,20`), and relative placement
   (`below=a`, `right_of=b`). Arithmetic, variables and loops handle repeated
   layouts: `let w = 120`, `repeat 7 i ... at=60 + i*w, 100 ... end`.
+- **Math and figures.** `math "\int_0^1 x^2\,dx"` typesets TeX (through
+  matplotlib's mathtext) at the text size, on the baseline of the text next to
+  it. SVG files from matplotlib, Inkscape and other tools are cleaned up so that
+  Rnote renders them.
 - **Feedback for the model.** Errors and warnings carry line numbers: overlapping
   text and shapes, content off the page, large page gaps, tiny diagrams. Each
   build lists element ids with their positions, and an optional preview image
@@ -56,9 +63,11 @@ read in one go, and is also available from the MCP server.
 ```sh
 pip install -e .            # or: pipx install .
 pip install Pillow          # optional: exact font metrics + embedding PNG/JPEG as Rnote bitmaps
+pip install matplotlib      # optional: the math command (TeX formulas)
 ```
 
-rnotegen has no required dependencies (Python 3.10+). PNG previews need
+rnotegen has no required dependencies (Python 3.10+). The optional ones are also
+available as extras: `pip install -e '.[images,math]'`. PNG previews need
 `rsvg-convert` (package `librsvg2-bin` on Debian/Ubuntu, `librsvg` on Fedora/Homebrew)
 or `pip install cairosvg`. SVG previews always work.
 
@@ -130,6 +139,13 @@ files are tested by loading and rendering them with the real Rnote engine:
 `rnote-cli` 0.14.2 and the 0.15.0 development version. `--into` appends to files
 saved by Rnote 0.9 to 0.14, including handwritten notes.
 
+Rnote draws an embedded SVG nested inside an `<svg>` element of its own, so a file
+with an XML declaration or DOCTYPE (matplotlib, Inkscape and most real files)
+would show up as an empty box. rnotegen rewrites SVGs the way Rnote's own importer
+does: no declaration, DOCTYPE, comments or metadata, `<use>` expanded, CSS turned
+into attributes, ids prefixed per image. The preview nests images the same way,
+and `build`/`check` report an image that would not render.
+
 Text is laid out by Rnote with your installed fonts. When Pillow and fontconfig are
 available, rnotegen measures text with the same fonts, so centering and wrapping
 are exact. Otherwise it uses slightly generous estimates.
@@ -145,5 +161,5 @@ flowchart, sequence and mindmap files. `examples/out/` holds the generated
 
 ```sh
 pip install pytest
-python -m pytest tests                # RNOTE_CLI=/path/to/rnote-cli also validates files with Rnote
+python -m pytest tests                # RNOTE_CLI=/path/to/rnote-cli also loads and renders files with Rnote
 ```

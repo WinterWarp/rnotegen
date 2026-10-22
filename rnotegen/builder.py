@@ -21,12 +21,14 @@ from .dsl import ScriptError, Stmt, Token, parse_script
 from .expr import ExprError, evaluate, interpolate, split_size, split_top
 from .markdown import Op, parse_markdown
 from .markup import parse_inline
+from .mathtex import MathError, MathUnavailable, fix_mathtext, math_fontset, render_math
 from .model import (
     ALIGNMENTS, Arrow, BBox, BitmapImageEl, CubBez, Document, Element, Ellipse, Line, PAGE_FORMATS_MM, LAYOUTS,
     PATTERNS, PenEl, Point, Polygon, Polyline, QuadBez, Rect, ShapeEl, Style, TextEl, VectorImageEl, mm_to_px,
     union_all,
 )
-from .textmetrics import LINE_HEIGHT, center_factor, resolve_family
+from .svgnorm import SvgError, normalize_svg, rnote_parse_error, svg_intrinsic_size  # noqa: F401 (re-exported)
+from .textmetrics import LINE_HEIGHT, baseline_offset, center_factor, family_class, resolve_family
 
 UNITS = {"px": 1.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "pt": 96 / 72}
 _LEN_RE = re.compile(r"^([-+]?(?:\d+\.?\d*|\.\d+))\s*(px|mm|cm|in|pt|%)?$", re.I)
@@ -73,6 +75,7 @@ class Defaults:
     box_fill: Color | None = field(default_factory=lambda: parse_color("#f3f5ff"))
     box_stroke: Color | None = field(default_factory=lambda: parse_color("#3b4a7a"))
     link_color: Color = field(default_factory=lambda: parse_color("#1f5fbf"))
+    math_font: str | None = None  # mathtext font set; None: follows font (sans or serif)
 
 
 @dataclass
@@ -82,12 +85,27 @@ class Entry:
     elements: list[Element]
     line: int
     shape: tuple[str, float, float, float, float] | None = None  # (kind, x, y, w, h) for nodes
+    # a group's min_height: (distance from the group's top down to its first element, reserved height).
+    # Kept relative to the elements so that it moves with them.
+    reserved: tuple[float, float] | None = None
 
     def bbox(self) -> BBox:
         if self.shape:
             _, x, y, w, h = self.shape
             return BBox(x, y, x + w, y + h)
-        return union_all([e.bbox() for e in self.elements]) or BBox(0, 0, 0, 0)
+        bb = union_all([e.bbox() for e in self.elements]) or BBox(0, 0, 0, 0)
+        if self.reserved:
+            top = bb.y0 - self.reserved[0]
+            bb = bb.union(BBox(bb.x0, top, bb.x1, top + self.reserved[1]))
+        return bb
+
+    def baseline(self) -> float | None:
+        """y of the first text line's baseline (text, headings, math), or None."""
+        for e in self.elements:
+            b = baseline_of(e)
+            if b is not None:
+                return b
+        return None
 
     def outline(self) -> list[Point]:
         if self.shape:
@@ -108,7 +126,11 @@ class Ctx:
     paged: bool
     placed_on_page: bool = False
     after_list: bool = False  # the previous flow element was a list item (tighter spacing)
-    pending_heading: tuple | None = None  # (elements, top y, height) of a heading not yet followed by content
+    # [(elements, top y)] of headings (and a short paragraph under them) that move to the next page with the next block
+    keep_with_next: list[tuple[list[Element], float]] | None = None
+    keep_open: bool = False  # a short paragraph may still join keep_with_next
+    flow_top: float | None = None  # top of the element being placed by the flow (set by flow_y, used by emit)
+    last_block: list[tuple[list[Element], float]] | None = None  # the last flow block, for `space N keep`
 
 
 class Opts:
@@ -179,7 +201,9 @@ class Opts:
         for k in self.st.kw:
             if k not in self.used:
                 valid = sorted(self.used | set(self.b.last_known))
-                near = difflib.get_close_matches(k, valid + list(_COMMON_KEYS), n=1, cutoff=0.6)
+                # a known option that has no effect here gets no hint (it would suggest itself)
+                cands = [c for c in valid + list(_COMMON_KEYS) if c != k]
+                near = difflib.get_close_matches(k, cands, n=1, cutoff=0.6) if k not in _COMMON_KEYS else []
                 hint = f" (did you mean '{near[0]}'?)" if near else ""
                 self.b.warn(self.st.line, f"option '{self.st.kw_lines.get(k, k)}' is not used by '{self.st.cmd}'{hint}")
         for i, t in enumerate(self.st.pos):
@@ -190,6 +214,11 @@ class Opts:
 _COMMON_KEYS = ("at", "center", "anchor", "below", "above", "right_of", "left_of", "gap", "align", "id", "width",
                 "height", "size", "stroke", "fill", "color", "stroke_width", "dash", "font", "rotate", "opacity",
                 "label", "shape", "theme", "scale", "x", "y")
+# placement methods and their option names, in order of precedence
+_PLACEMENT = (("at", ("at", "pos", "position", "xy")), ("center", ("center", "centre", "middle", "c")),
+              ("below", ("below", "under")), ("above", ("above", "over")),
+              ("right_of", ("right_of", "rightof", "right")), ("left_of", ("left_of", "leftof", "left")),
+              ("x", ("x", "left_x")), ("y", ("y", "top_y")))
 
 
 def parse_bool(v: str, line: int, name: str) -> bool:
@@ -264,6 +293,7 @@ class Builder:
         return self.finish()
 
     def finish(self) -> Document:
+        self._check_images()
         if self.errors:
             raise BuildError(self.errors, self.warnings)
         self.doc.min_pages = self.min_pages
@@ -303,6 +333,7 @@ class Builder:
             st = self._interpolated(st)
         o = Opts(st, self)
         self.cur_line = st.line
+        self.ctx.flow_top = None
         try:
             handler(st, o)
             o.finish()
@@ -320,7 +351,9 @@ class Builder:
     def _interpolated(self, st: Stmt) -> Stmt:
         """Copy of st with {expr} replaced in strings and option values (inside repeat / after let)."""
         v = self.variables()
-        out = Stmt(st.cmd, st.line, [Token(interpolate(t.value, v), t.quoted, t.is_kv) for t in st.pos],
+        # TeX is full of braces: a math formula is never interpolated (its options are)
+        pos = [t if st.cmd == "math" and t.quoted else Token(interpolate(t.value, v), t.quoted, t.is_kv) for t in st.pos]
+        out = Stmt(st.cmd, st.line, pos,
                    {k: Token(interpolate(t.value, v), t.quoted, t.is_kv) for k, t in st.kw.items()},
                    dict(st.kw_lines), st.body, st.body_line, st.children, st.raw)
         if st.body is not None and st.cmd in ("text", "para", "quote", "callout"):
@@ -365,11 +398,20 @@ class Builder:
             ent = self.ids[m.group(1)]
             bb = ent.bbox()
             anchor = m.group(2) or "center"
-            try:
-                p = bb.anchor(anchor)
-            except KeyError:
-                raise ScriptError(line, f"unknown anchor '.{anchor}'",
-                                  "use one of: topleft top topright left center right bottomleft bottom bottomright")
+            akey = anchor.lower().replace("_", "")
+            if akey in ("baseline", "baselineleft", "baselinecenter", "baselineright"):
+                base = ent.baseline()
+                if base is None:
+                    raise ScriptError(line, f"{m.group(1)!r} has no text baseline ('.{anchor}')",
+                                      "baselines exist for text, headings and math; use .bottom or .bottomleft")
+                p = (bb.x0 + bb.w * {"baselinecenter": 0.5, "baselineright": 1.0}.get(akey, 0.0), base)
+            else:
+                try:
+                    p = bb.anchor(anchor)
+                except KeyError:
+                    raise ScriptError(line, f"unknown anchor '.{anchor}'",
+                                      "use one of: topleft top topright left center right bottomleft bottom bottomright "
+                                      "baseline")
             if m.group(3):
                 # the sign belongs to dx only: a.bottom-70,20 means dx=-70, dy=+20
                 off = split_top(m.group(3) + m.group(4), ",")
@@ -411,15 +453,18 @@ class Builder:
             raise ScriptError(line, f"{name}: expected WxH like 200x80 or (w-10)x80, got {v!r}")
         return self.length(sp[0], line, "x", name), self.length(sp[1], line, "y", name)
 
-    def emit(self, st: Stmt, els: list[Element], o: Opts | None = None, flow: bool = False,
+    def emit(self, st: Stmt, els: list[Element], o: Opts | None = None, joins_heading: bool = False,
              shape: tuple | None = None, register: bool = True) -> Entry:
+        """Add elements to the current context. joins_heading: a short paragraph that stays with the heading above it."""
         for e in els:
             self.src_line[id(e)] = st.line
-        self.ctx.out.extend(els)
+        c = self.ctx
+        c.out.extend(els)
         ent = Entry(els, st.line, shape)
         if shape is not None and not self.ctx_stack:
             self.shape_entries.append(ent)
-        self.ctx.pending_heading = None
+        chain, chain_open = c.keep_with_next, c.keep_open
+        c.keep_with_next, c.keep_open = None, False
         if o is not None and register:
             ident = o.raw("id", "name")
             if ident:
@@ -431,50 +476,69 @@ class Builder:
         floating = o.flag("float", "floating", "overlay") if o is not None else False
         if els and not floating:
             bb = ent.bbox() if shape is None else union_all([e.bbox() for e in els])
-            self.ctx.cursor = max(self.ctx.cursor, bb.y1 + self.d.gap)
-            self.ctx.placed_on_page = True
+            c.cursor = max(c.cursor, bb.y1 + self.d.gap)
+            c.placed_on_page = True
+            if c.flow_top is not None:
+                # placed by the flow: on the same page as the headings it was kept with
+                c.last_block = (chain or []) + [(els, c.flow_top)]
+                if joins_heading and chain and chain_open and bb.h <= self._content_height() * 0.25:
+                    c.keep_with_next = c.last_block
+            else:
+                c.last_block = None
+        c.flow_top = None
         return ent
+
+    def _content_height(self) -> float:
+        page = self.doc.page
+        return page.height - 2 * page.margin
 
     # ------------------------------------------------------------------ placement
 
     def place(self, o: Opts, w: float, h: float, need_flow_ok: bool = True, align: str = "left",
-              keep: float = 0.0) -> tuple[float, float, bool]:
-        """Top-left corner for a w x h box from at=/center=/below=/x=/y= options, or the flow position."""
+              keep: float = 0.0, baseline: float | None = None) -> tuple[float, float, bool]:
+        """Top-left corner for a w x h box from at=/center=/below=/x=/y= options, or the flow position.
+
+        baseline: distance from the top to the first text baseline (text and math), for
+        anchor=baseline and align=baseline.
+        """
         line = o.st.line
         anchor = (o.raw("anchor", "origin") or "topleft").lower()
-        try:
-            ax, ay = BBox(0, 0, w, h).anchor(anchor)
-        except KeyError:
-            raise ScriptError(line, f"unknown anchor {anchor!r}",
-                              "use one of: topleft top topright left center right bottomleft bottom bottomright")
-        v = o.raw("at", "pos", "position", "xy")
-        if v is not None:
-            p = self.point(v, line, "at")
+        ax, ay = self._anchor_offset(anchor, w, h, baseline, line)
+        given = self._placement_options(o)
+        if given:
+            self._warn_ignored_placement(o, given)
+        method, key = given[0] if given else (None, None)
+        if method == "at":
+            p = self.point(o.raw(key), line, "at")
             return p[0] - ax, p[1] - ay, False
-        v = o.raw("center", "centre", "middle", "c")
-        if v is not None:
-            p = self.point(v, line, "center")
+        if method == "center":
+            p = self.point(o.raw(key), line, "center")
             return p[0] - w / 2, p[1] - h / 2, False
         gap = o.num("gap", "margin", "spacing", default=20.0)
-        for keys, side in ((("below", "under"), "below"), (("above", "over"), "above"),
-                           (("right_of", "rightof", "right"), "right"), (("left_of", "leftof", "left"), "left")):
-            v = o.raw(*keys)
-            if v is None:
-                continue
+        if method in ("below", "above", "right_of", "left_of"):
+            v = o.raw(key)
             ref = self._ref_bbox(v, line)
-            al = (o.raw("align") or ("center" if side in ("below", "above") else "middle")).lower()
-            if side in ("below", "above"):
+            al = (o.raw("align") or ("center" if method in ("below", "above") else "middle")).lower()
+            if method in ("below", "above"):
                 x = {"left": ref.x0, "start": ref.x0, "right": ref.x1 - w, "end": ref.x1 - w}.get(al, ref.cx - w / 2)
-                y = ref.y1 + gap if side == "below" else ref.y0 - gap - h
+                y = ref.y1 + gap if method == "below" else ref.y0 - gap - h
             else:
-                y = {"top": ref.y0, "bottom": ref.y1 - h}.get(al, ref.cy - h / 2)
-                x = ref.x1 + gap if side == "right" else ref.x0 - gap - w
+                if al == "baseline":
+                    if baseline is None:
+                        raise ScriptError(line, f"align=baseline needs text or math, and '{o.st.cmd}' has no baseline",
+                                          "use align=top, middle or bottom")
+                    y = self._ref_baseline(v, line) - baseline
+                else:
+                    y = {"top": ref.y0, "bottom": ref.y1 - h}.get(al, ref.cy - h / 2)
+                x = ref.x1 + gap if method == "right_of" else ref.x0 - gap - w
             return x, y, False
-        xs, ys = o.raw("x", "left_x"), o.raw("y", "top_y")
-        if xs is not None or ys is not None:
+        if method in ("x", "y"):
+            xs, ys = o.raw("x", "left_x"), o.raw("y", "top_y")
             x = self.ctx.ox + self.length(xs, line, "x", "x") - ax if xs is not None else self.ctx.col_x
-            y = self.ctx.oy + self.length(ys, line, "y", "y") - ay if ys is not None else self.ctx.cursor
-            return x, y, False
+            if ys is not None:
+                return x, self.ctx.oy + self.length(ys, line, "y", "y") - ay, False
+            # only x=: the flow decides y, including page breaks
+            return x, self.flow_y(h + keep), True
         if not need_flow_ok:
             raise ScriptError(line, f"'{o.st.cmd}' needs a position", "add at=X,Y (or center=X,Y, below=ID, ...)")
         al = (o.raw("align") or align).lower()
@@ -495,6 +559,52 @@ class Builder:
         p = self.point(v, line)
         return BBox(p[0], p[1], p[0], p[1])
 
+    def _ref_baseline(self, v: str, line: int) -> float:
+        """Baseline y of an element, or the y of a point."""
+        v = v.strip()
+        if v in self.ids:
+            b = self.ids[v].baseline()
+            if b is None:
+                raise ScriptError(line, f"{v!r} has no text baseline", "align=baseline works next to text, headings and math")
+            return b
+        return self.point(v, line)[1]
+
+    def _anchor_offset(self, anchor: str, w: float, h: float, baseline: float | None, line: int) -> Point:
+        key = anchor.replace("_", "").replace("-", "")
+        if key.startswith("baseline"):
+            if baseline is None:
+                raise ScriptError(line, f"anchor={anchor} needs text or math", "use one of: topleft top topright left "
+                                  "center right bottomleft bottom bottomright")
+            fx = {"baseline": 0.0, "baselineleft": 0.0, "baselinecenter": 0.5, "baselineright": 1.0}.get(key)
+            if fx is None:
+                raise ScriptError(line, f"unknown anchor {anchor!r}", "use baseline, baseline_center or baseline_right")
+            return w * fx, baseline
+        try:
+            return BBox(0, 0, w, h).anchor(anchor)
+        except KeyError:
+            raise ScriptError(line, f"unknown anchor {anchor!r}",
+                              "use one of: topleft top topright left center right bottomleft bottom bottomright, "
+                              "or baseline for text and math")
+
+    def _placement_options(self, o: Opts) -> list[tuple[str, str]]:
+        """The placement options given, as (method, key as written), in order of precedence."""
+        out = []
+        for method, keys in _PLACEMENT:
+            k = next((k for k in keys if k in o.st.kw), None)
+            if k is not None:
+                out.append((method, k))
+        return out
+
+    def _warn_ignored_placement(self, o: Opts, given: list[tuple[str, str]]) -> None:
+        """at= wins over center=, which wins over below= etc., which win over x=/y=. Say so."""
+        method, key = given[0]
+        shown = o.st.kw_lines.get(key, key)
+        for m, k in given[1:]:
+            if method in ("x", "y") and m in ("x", "y"):
+                continue  # x= and y= work together
+            o.raw(k)
+            self.warn(o.st.line, f"{o.st.kw_lines.get(k, k)}= is ignored because {shown}= is set")
+
     def flow_y(self, h: float, list_item: bool = False) -> float:
         c = self.ctx
         if c.after_list and not list_item:
@@ -502,6 +612,7 @@ class Builder:
         c.after_list = list_item
         y = c.cursor
         if not c.paged:
+            c.flow_top = y
             return y
         page = self.doc.page
         ph, m = page.height, page.margin
@@ -512,33 +623,50 @@ class Builder:
         limit = top + ph - m
         if y + h > limit and h <= ph - 2 * m + 0.5 and y > top + m + 1:
             left = limit - y
-            y = self._new_page_y()
+            y = self._new_page_y(h)
             if left > 0.35 * (ph - 2 * m):
                 self.warn(self.cur_line, f"this did not fit on the page and moved to the next one, leaving {left:.0f}px "
                                          f"empty (make it smaller with height=/scale=/width=, or accept the gap)")
+        c.flow_top = y
         return y
 
-    def _new_page_y(self) -> float:
-        """Move the flow to the top of the next page, taking a just-placed heading along."""
+    def _new_page_y(self, need: float = 0.0) -> float:
+        """Move the flow to the top of the next page, taking the headings that keep with the next block along.
+
+        need: height of the block that is about to be placed (the headings stay if both would not fit).
+        """
         c = self.ctx
         page = self.doc.page
         idx = max(0, math.floor((c.cursor - 0.001) / page.height))
         y = (idx + 1) * page.height + page.margin
-        if c.pending_heading is not None:
-            els, top, height = c.pending_heading
-            if math.floor(top / page.height) == idx:
-                for e in els:
-                    e.translate(0, y - top)
-                y += height
-            c.pending_heading = None
+        chain = c.keep_with_next
+        if chain:
+            top = chain[0][1]
+            # not when the headings already start the page: moving them would only leave an empty page
+            if math.floor(top / page.height) == idx and top > idx * page.height + page.margin + 1 \
+                    and c.cursor - top + need <= self._content_height() + 0.5:
+                y = c.cursor + self._shift_blocks(chain, y - top)
         c.cursor = y
         c.placed_on_page = y > (idx + 1) * page.height + page.margin + 1
         return y
 
-    def break_page(self) -> None:
+    def _shift_blocks(self, blocks: list[tuple[list[Element], float]], dy: float) -> float:
+        """Move flow blocks down by dy (to the next page), keeping the context's references to them current."""
+        moved = [(els, top + dy) for els, top in blocks]
+        for els, _ in blocks:
+            for e in els:
+                e.translate(0, dy)
+        c = self.ctx
+        if c.keep_with_next is blocks:
+            c.keep_with_next = moved
+        if c.last_block is blocks:
+            c.last_block = moved
+        return dy
+
+    def break_page(self, need: float = 0.0) -> None:
         """Continue the flow at the top of the next page."""
         if self.ctx.paged:
-            self._new_page_y()
+            self._new_page_y(need)
 
     def _keep_together(self, h: float) -> None:
         """Move to the next page if a block of height h does not fit here but is short enough to keep whole."""
@@ -547,7 +675,7 @@ class Builder:
             return
         page = self.doc.page
         if self.page_room() < h <= (page.height - 2 * page.margin) * 0.5:
-            self.break_page()
+            self.break_page(h)
 
     def page_room(self) -> float:
         """Remaining height on the current page for flow content (inf when not paged)."""
@@ -734,6 +862,9 @@ class Builder:
         if o.has("box_stroke"):
             d.box_stroke = o.color("box_stroke")
         d.link_color = o.color("link_color", default=d.link_color) or d.link_color
+        v = o.raw("math_font", "math_fontset")
+        if v is not None:
+            d.math_font = math_fontset(v)
 
     def cmd_page(self, st: Stmt, o: Opts) -> None:
         if self.ctx_stack:
@@ -764,7 +895,7 @@ class Builder:
             return
         c.cursor = (idx + 1) * ph + self.doc.page.margin
         c.placed_on_page = False
-        c.pending_heading = None
+        c.keep_with_next, c.keep_open, c.last_block = None, False, None
         if not self.ctx_stack:
             c.ox, c.oy = 0.0, (idx + 1) * ph
         self.min_pages = max(self.min_pages, idx + 2)
@@ -776,7 +907,26 @@ class Builder:
             o.used_pos.add(i)
             break
         amount = o.num("height", "amount", "size", default=amount, axis="y")
+        if o.flag("keep", "keep_together", "together", "nobreak") and self.ctx.paged and amount > self.page_room() + 0.5:
+            self._space_to_next_page(amount)
         self.ctx.cursor += amount
+
+    def _space_to_next_page(self, amount: float) -> None:
+        """`space N keep` that does not fit: take the block above it (and its headings) to the next page."""
+        c = self.ctx
+        page = self.doc.page
+        idx = max(0, math.floor((c.cursor - 0.001) / page.height))
+        new_top = (idx + 1) * page.height + page.margin
+        blocks = c.last_block
+        if blocks:
+            top = blocks[0][1]
+            if math.floor(top / page.height) == idx and top > idx * page.height + page.margin + 1 \
+                    and c.cursor - top + amount <= self._content_height() + 0.5:
+                c.cursor += self._shift_blocks(blocks, new_top - top)
+                return
+        if amount <= self._content_height() and not self.at_page_top():
+            c.cursor = new_top  # nothing to take along: the space starts the next page
+            c.placed_on_page = False
 
     # ------------------------------------------------------------------ text commands
 
@@ -818,7 +968,7 @@ class Builder:
             y = self.flow_y(h)
             el.y = y
             el.x = self._aligned_x(c.col_x, wrap, w, align, spec["font"])
-            self.emit(st, [el], o, flow=True)
+            self.emit(st, [el], o, joins_heading=True)
             return
         el = self.make_text(text, 0, 0, spec, wrap, align, angle)
         est_w, h, _ = el.measure()
@@ -826,7 +976,8 @@ class Builder:
         vis_w = est_w * (center_factor(spec["font"]) if a in ("center", "end") else 1.0)
         # with width=, the position refers to the whole text box and the text is aligned inside it
         box_w = wrap if wrap else vis_w
-        x, y, _ = self.place(o, box_w, h, need_flow_ok=True, align=align)
+        x, y, _ = self.place(o, box_w, h, need_flow_ok=True, align=align,
+                             baseline=baseline_offset(spec["font"], spec["size"], spec["weight"] >= 600))
         el.x = self._aligned_x(x, box_w, est_w, align, spec["font"]) if wrap else x
         el.y = y
         if wrap is None:
@@ -867,7 +1018,7 @@ class Builder:
         el = self.make_text(text, 0, 0, spec, c.col_w, align)
         w, h, _ = el.measure()
         if explicit:
-            x, y, _ = self.place(o, w, h)
+            x, y, _ = self.place(o, w, h, baseline=baseline_offset(spec["font"], spec["size"], True))
             el.x, el.y = x, y
             el.max_width = None
         else:
@@ -883,7 +1034,8 @@ class Builder:
         self.emit(st, els, o)
         c.cursor -= self.d.gap * 0.4
         if not explicit:
-            c.pending_heading = (els, el.y, c.cursor - el.y)
+            # keep with the next block (and with headings right above, which emit() put in last_block)
+            c.keep_with_next, c.keep_open = c.last_block, True
 
     def cmd_h1(self, st, o):
         self._heading(st, o, 1)
@@ -1023,7 +1175,7 @@ class Builder:
                     raise ScriptError(st.line, "rect needs a size", "write: rect at=100,100 size=200x80  (or rect 100,100 300,180)")
             if pts:
                 anchor = (o.raw("anchor") or "topleft").lower()
-                ax, ay = BBox(0, 0, w, h).anchor(anchor)
+                ax, ay = self._anchor_offset(anchor, w, h, None, st.line)
                 x, y = pts[0][0] - ax, pts[0][1] - ay
             else:
                 x, y, _ = self.place(o, w, h)
@@ -1492,6 +1644,10 @@ class Builder:
     def cmd_group(self, st: Stmt, o: Opts) -> None:
         explicit_at = o.raw("at", "origin", "pos")
         width = o.num("width", "w", axis="x")
+        # blank space reserved below the content, on the same page (worksheet answer space)
+        min_h = o.num("min_height", "min_h", "minheight", "reserve", axis="y", default=0.0)
+        if min_h < 0:
+            raise ScriptError(st.line, f"min_height must be positive, got {min_h:g}")
         parent = self.ctx
         out: list[Element] = []
         if explicit_at is not None:
@@ -1513,16 +1669,22 @@ class Builder:
         if not out:
             self.warn(st.line, "group is empty")
             return
+        bb = union_all([e.bbox() for e in out])
         if flow:
-            bb = union_all([e.bbox() for e in out])
-            x, y, _ = self.place(o, bb.x1 - min(0.0, bb.x0), bb.y1 - min(0.0, bb.y0))
+            x, y, _ = self.place(o, bb.x1 - min(0.0, bb.x0), max(bb.y1 - min(0.0, bb.y0), min_h))
             for e in out:
                 e.translate(x - min(0.0, bb.x0), y - min(0.0, bb.y0))
+            top_offset = max(0.0, bb.y0)  # from the group's top-left corner down to its content
         else:
             o.raw("align")
+            top_offset = bb.y0 - oy
         for e in out:
             self.src_line.setdefault(id(e), st.line)
-        self.emit(st, out, o)
+        ent = self.emit(st, out, o)
+        if min_h:
+            ent.reserved = (top_offset, min_h)
+            if not o.flag("float", "floating", "overlay"):
+                self.ctx.cursor = max(self.ctx.cursor, ent.bbox().y1 + self.d.gap)
 
     # ------------------------------------------------------------------ blocks
 
@@ -1665,7 +1827,7 @@ class Builder:
             el = self.make_text(op.text, c.col_x, 0, spec, c.col_w)
             _, h, _ = el.measure()
             el.y = self.flow_y(h)
-            self.emit(st, [el], None)
+            self.emit(st, [el], None, joins_heading=True)
         elif op.kind in ("bullet", "todo"):
             spec = self.text_spec(o)
             if op.kind == "todo":
@@ -1850,16 +2012,22 @@ class Builder:
         if path is not None:
             full = os.path.join(self.base_dir, path)
             try:
-                with open(full, encoding="utf-8") as f:
-                    svg = f.read()
+                with open(full, "rb") as f:
+                    data: str | bytes = f.read()
             except OSError as e:
                 raise ScriptError(st.line, f"cannot read svg file {path!r}: {e.strerror}")
         else:
-            svg = "\n".join(st.body or [])
-        iw, ih = svg_intrinsic_size(svg)
-        if iw is None:
-            raise ScriptError(st.line, "svg has no width/height or viewBox", "add width=\"...\" height=\"...\" to the <svg> tag")
+            data = "\n".join(st.body or [])
+        svg, iw, ih = self._normalized_svg(st, data, path)
         self._place_image(st, o, iw, ih, lambda x, y, w, h: VectorImageEl(svg, x, y, w, h, (iw, ih)))
+
+    def _normalized_svg(self, st: Stmt, data: str | bytes, path: str | None) -> tuple[str, float, float]:
+        """SVG data that renders inside Rnote's wrapper (see svgnorm), with its size in px."""
+        try:
+            return normalize_svg(data)
+        except SvgError as e:
+            hint = "add width=\"...\" height=\"...\" to the <svg> tag" if "width" in str(e) else None
+            raise ScriptError(st.line, f"svg{' ' + repr(path) if path else ''}: {e}", hint)
 
     def cmd_image(self, st: Stmt, o: Opts) -> None:
         path = o.raw("file", "path", "src")
@@ -1875,10 +2043,7 @@ class Builder:
         except OSError as e:
             raise ScriptError(st.line, f"cannot read image {path!r}: {e.strerror}")
         if path.lower().endswith(".svg"):
-            svg = data.decode("utf-8", "replace")
-            iw, ih = svg_intrinsic_size(svg)
-            if iw is None:
-                raise ScriptError(st.line, "svg has no width/height or viewBox")
+            svg, iw, ih = self._normalized_svg(st, data, path)
             self._place_image(st, o, iw, ih, lambda x, y, w, h: VectorImageEl(svg, x, y, w, h, (iw, ih)))
             return
         dims, mime = raster_info(data)
@@ -1897,6 +2062,39 @@ class Builder:
             return VectorImageEl(svg, x, y, w, h, (pw, ph))
 
         self._place_image(st, o, pw, ph, make)
+
+    def cmd_math(self, st: Stmt, o: Opts) -> None:
+        strs = o.strings()
+        tex = " ".join(l.strip() for l in st.body if l.strip()) if st.body is not None else " ".join(strs)
+        if not tex.strip(" $"):
+            raise ScriptError(st.line, "math needs a formula", 'write: math "\\frac{a}{b}"   (TeX, as in $...$)')
+        if not o.flag("raw", "verbatim", "as_is"):
+            tex = fix_mathtext(tex)
+        d = self.d
+        size = o.num("size", "font_size", "fontsize", default=d.size)
+        if size <= 0:
+            raise ScriptError(st.line, f"font size must be positive, got {size:g}")
+        color = o.color("color", "text_color", default=d.text_color) or d.text_color
+        alpha = color.a * o.num("opacity", "alpha", default=1.0)
+        font = o.raw("font", "math_font", "fontset")
+        try:
+            fontset = math_fontset(font) if font else d.math_font or (
+                "dejavuserif" if family_class(d.font) == "serif" else "dejavusans")
+        except ValueError as e:
+            raise ScriptError(st.line, str(e))
+        # at least as tall as a line of text, with the baseline where the text's would be
+        ascent = baseline_offset(d.font, size)
+        try:
+            svg, w, h, base = render_math(tex, size, color.to_hex()[:7], alpha, fontset, ascent, size * LINE_HEIGHT - ascent)
+        except MathUnavailable:
+            raise ScriptError(st.line, "math needs matplotlib, which is not installed",
+                              "pip install matplotlib   (or: pip install 'rnotegen[math]')")
+        except MathError as e:
+            raise ScriptError(st.line, f"TeX that matplotlib's mathtext cannot read: {e}",
+                              "mathtext supports most of TeX math, but no environments (\\begin) or \\\\ line breaks")
+        svg, iw, ih = normalize_svg(svg)
+        x, y, _ = self.place(o, w, h, baseline=base)
+        self.emit(st, [VectorImageEl(svg, x, y, w, h, (iw, ih), baseline=base / h)], o)
 
     def _place_image(self, st: Stmt, o: Opts, iw: float, ih: float, make: Callable) -> None:
         w = o.num("width", "w", axis="x")
@@ -1917,6 +2115,17 @@ class Builder:
 
     # ------------------------------------------------------------------ checks
 
+    def _check_images(self) -> None:
+        """Rnote renders svg_data inside an <svg> of its own; data that does not parse there shows as an empty box."""
+        for e in self.doc.elements:
+            if isinstance(e, VectorImageEl):
+                err = rnote_parse_error(e.svg, e.x, e.y, e.w, e.h, e.intrinsic)
+                if err:
+                    self.errors.append(ScriptError(
+                        self.src_line.get(id(e), 0),
+                        f"image would be blank in Rnote: its SVG data is not valid XML inside Rnote's wrapper ({err})",
+                        "use the svg or image command, which cleans up SVG files for Rnote"))
+
     def _checks(self) -> None:
         page = self.doc.page
         els = self.doc.elements
@@ -1926,7 +2135,8 @@ class Builder:
         paged = page.layout in ("fixed_size", "continuous_vertical")
         reported = 0
         for e in els:
-            bb = e.bbox()
+            # the geometry, not the stroke: a rect at y=0 has its outline half above the page, which is fine
+            bb = e.geom_bbox()
             ln = self.src_line.get(id(e), 0)
             if paged and (bb.x1 > page.width + 1 or bb.x0 < -1):
                 self.warnings.append(f"line {ln}: content extends past the {'right' if bb.x1 > page.width + 1 else 'left'} "
@@ -1935,9 +2145,10 @@ class Builder:
             if bb.y0 < -1:
                 self.warnings.append(f"line {ln}: content above the top of the first page (y={bb.y0:.0f})")
                 reported += 1
-            if page.layout == "fixed_size" and math.floor((bb.y0 + 0.5) / page.height) != math.floor((bb.y1 - 0.5) / page.height) \
-                    and bb.h < page.height:
-                self.warnings.append(f"line {ln}: element crosses a page boundary (y {bb.y0:.0f}..{bb.y1:.0f})")
+            boundary = math.floor((bb.y1 - 0.5) / page.height) * page.height  # top of the page the bottom is on
+            if page.layout == "fixed_size" and boundary > 0 and bb.y0 < boundary - 0.5 and bb.h < page.height:
+                self.warnings.append(f"line {ln}: element crosses a page boundary (y {bb.y0:.0f}..{bb.y1:.0f}, "
+                                     f"page break at y={boundary:.0f})")
                 reported += 1
             if reported > 12:
                 break
@@ -1994,6 +2205,15 @@ class Builder:
         return out
 
 
+def baseline_of(e: Element) -> float | None:
+    """y of the element's first text baseline: text (unrotated) and math images."""
+    if isinstance(e, TextEl) and not e.angle:
+        return e.y + baseline_offset(e.font, e.size, e.weight >= 600)
+    if isinstance(e, VectorImageEl) and e.baseline is not None:
+        return e.y + e.h * e.baseline
+    return None
+
+
 def _cubic_at(p0, c1, c2, p1, t):
     u = 1 - t
     return (u**3 * p0[0] + 3 * u * u * t * c1[0] + 3 * u * t * t * c2[0] + t**3 * p1[0],
@@ -2001,38 +2221,6 @@ def _cubic_at(p0, c1, c2, p1, t):
 
 
 # ---------------------------------------------------------------------- image helpers
-
-
-def svg_intrinsic_size(svg: str) -> tuple[float | None, float | None]:
-    m = re.search(r"<svg\b[^>]*>", svg, re.S)
-    if not m:
-        return None, None
-    tag = m.group(0)
-
-    def attr(name):
-        a = re.search(rf'\b{name}\s*=\s*["\']([^"\']+)["\']', tag)
-        return a.group(1) if a else None
-
-    def plen(v):
-        if v is None:
-            return None
-        mm = re.match(r"^\s*([\d.]+)\s*(px|pt|mm|cm|in)?\s*$", v)
-        if not mm:
-            return None
-        return float(mm.group(1)) * UNITS[(mm.group(2) or "px")]
-
-    w, h = plen(attr("width")), plen(attr("height"))
-    vb = attr("viewBox")
-    if vb:
-        parts = [float(x) for x in re.split(r"[\s,]+", vb.strip()) if x]
-        if len(parts) == 4:
-            if w is None and h is None:
-                w, h = parts[2], parts[3]
-            elif w is None:
-                w = h * parts[2] / parts[3]
-            elif h is None:
-                h = w * parts[3] / parts[2]
-    return w, h
 
 
 def raster_info(data: bytes) -> tuple[tuple[int, int] | None, str]:

@@ -13,6 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 images = ["Pillow>=9"]
+math = ["matplotlib>=3.6"]
 png = ["cairosvg>=2.5"]
 test = ["pytest>=7"]
 

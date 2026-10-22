@@ -363,6 +363,10 @@ class Element:
     def bbox(self) -> BBox:
         raise NotImplementedError
 
+    def geom_bbox(self) -> BBox:
+        """Bounding box of the geometry, without the stroke width (bbox() includes it)."""
+        return self.bbox()
+
     def transform(self, s: float, dx: float, dy: float) -> None:
         raise NotImplementedError
 
@@ -381,6 +385,9 @@ class ShapeEl(Element):
 
     def bbox(self):
         return self.shape.bbox().expand(self.style.width / 2 if self.style.stroke else 0)
+
+    def geom_bbox(self):
+        return self.shape.bbox()
 
     def transform(self, s, dx, dy):
         self.shape.transform(s, dx, dy)
@@ -503,6 +510,9 @@ class PenEl(Element):
     def bbox(self):
         return bbox_of_points([(p[0], p[1]) for p in self.points]).expand(self.width / 2)
 
+    def geom_bbox(self):
+        return bbox_of_points([(p[0], p[1]) for p in self.points])
+
     def transform(self, s, dx, dy):
         self.points = [(p[0] * s + dx, p[1] * s + dy, p[2]) for p in self.points]
         self.width *= s
@@ -537,6 +547,7 @@ class VectorImageEl(Element):
     h: float
     intrinsic: tuple[float, float]
     id: str | None = None
+    baseline: float | None = None  # math: the baseline's distance from the top, as a fraction of the height
     layer = "image"
 
     def bbox(self):

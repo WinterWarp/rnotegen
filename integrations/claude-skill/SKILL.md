@@ -12,6 +12,8 @@ description: Create or edit Rnote (.rnote) notes, including handwritten-style no
    - Only a diagram: a Mermaid file (`.mmd`).
    - A drawing with exact positions: an `.rns` script with `at=`/`center=`, ids,
      `below=`/`right_of=` and `connect`; use `let` and `repeat` for repeated structures.
+   - Formulas: `math "TeX"` in a script (needs matplotlib), not SVGs made elsewhere.
+     Worksheet problems with answer space: `group min_height=...`.
 3. Build with a preview:
    `rnotegen build notes.rns -o notes.rnote -p notes.png`
 4. Read the report: fix every error (it has a line number) and every warning about overlaps,
