@@ -25,6 +25,7 @@ box "Label" at=100,200 size=160x60 shape=round fill=lightyellow id=a
 box "Next" below=a gap=60 id=b        connect a -> b "label"
 rect 100,100 300,200 fill=#eef      circle center=400,300 radius=40     arrow 100,400 300,400
 text "Note" at=b.right+20,0        (coordinates in px, origin top-left of page 1; A4 = 794 x 1123)
+let w = 120                        repeat 5 i ... end   (use i, w in numbers: at=60 + i*w, 300; "Item {i+1}")
 mermaid                            markdown
 flowchart TD                       # Heading
   A --> B                          - list item

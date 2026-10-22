@@ -35,7 +35,8 @@ script is designed for that:
 - **Exact positions when you want them.** Use `at=x,y`, `center=`, `anchor=`, units
   (`mm`, `cm`, `in`, `pt`, `%`), page-relative coordinates (`page 2`), named
   elements with anchors and offsets (`title.bottom+0,20`), and relative placement
-  (`below=a`, `right_of=b`).
+  (`below=a`, `right_of=b`). Arithmetic, variables and loops handle repeated
+  layouts: `let w = 120`, `repeat 7 i ... at=60 + i*w, 100 ... end`.
 - **Feedback for the model.** Errors and warnings carry line numbers: overlapping
   text and shapes, content off the page, large page gaps, tiny diagrams. Each
   build lists element ids with their positions, and an optional preview image
@@ -92,7 +93,9 @@ Tools: `rnote_reference`, `rnote_build`, `rnote_check`, `rnote_from_mermaid`,
 a model with vision can look at what it made and fix it.
 
 **Shell-based agents:** tell the model "Run `rnotegen spec`, then write a script and
-build it with `rnotegen build file.rns -o file.rnote -p preview.png`."
+build it with `rnotegen build file.rns -o file.rnote -p preview.png`." For Claude
+Code there is a ready-made skill: copy `integrations/claude-skill/` to
+`~/.claude/skills/rnote/`.
 
 ## Mermaid support
 
