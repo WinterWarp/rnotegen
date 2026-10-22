@@ -171,7 +171,8 @@ def decompile(path: str, pen: str = "simplify", images: str = "inline", image_di
         if kind == "textstroke":
             ts = s.get("text_style", {})
             m00, m10, m01, m11, tx, ty = _transform_of(s)
-            parts = [f"text {_quote(_text_markup(s.get('text', ''), ts.get('ranged_text_attributes')))}", f"at={_n(tx)},{_n(ty)}"]
+            pos_key = "at" if ts.get("alignment", "start") == "start" or not ts.get("max_width") else "text_origin"
+            parts = [f"text {_quote(_text_markup(s.get('text', ''), ts.get('ranged_text_attributes')))}", f"{pos_key}={_n(tx)},{_n(ty)}"]
             scale = math.hypot(m00, m10)
             parts.append(f"size={_n(ts.get('font_size', 32) * scale)}")
             fam = ts.get("font_family", "serif")

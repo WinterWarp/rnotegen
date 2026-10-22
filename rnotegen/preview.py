@@ -102,8 +102,74 @@ def _pts(pts) -> str:
     return " ".join(f"{x:.2f},{y:.2f}" for x, y in pts)
 
 
-def element_svg(svg: _Svg, e) -> None:
+def _outline_points(s) -> tuple[list, bool]:
+    """Sampled outline of a shape (points, closed)."""
+    from .model import _sample_cubic, _sample_quad
+
+    if isinstance(s, Rect):
+        return s.corners(), True
+    if isinstance(s, Ellipse):
+        a = math.radians(s.angle)
+        pts = []
+        for k in range(48):
+            t = 2 * math.pi * k / 48
+            x, y = s.rx * math.cos(t), s.ry * math.sin(t)
+            pts.append((s.cx + x * math.cos(a) - y * math.sin(a), s.cy + x * math.sin(a) + y * math.cos(a)))
+        return pts, True
+    if isinstance(s, Line):
+        return [s.start, s.end], False
+    if isinstance(s, Arrow):
+        return [s.start, s.tip], False
+    if isinstance(s, Polygon):
+        return list(s.points), True
+    if isinstance(s, Polyline):
+        return list(s.points), False
+    if isinstance(s, QuadBez):
+        return _sample_quad(s.start, s.cp, s.end), False
+    if isinstance(s, CubBez):
+        return _sample_cubic(s.start, s.cp1, s.cp2, s.end), False
+    return [], False
+
+
+def _rough_svg(svg: _Svg, e, seed: int) -> None:
+    """Approximate Rnote's rough (hand-drawn) style: two slightly jittered passes."""
+    import random
+
+    s, st = e.shape, e.style
+    pts, closed = _outline_points(s)
+    if len(pts) < 2:
+        return
+    rnd = random.Random(seed)
+    if closed and st.fill is not None and st.fill.a > 0:
+        fill = svg.hatch(st.fill, st.fill_style, st.hachure_angle) if st.fill_style != "solid" else st.fill.to_hex()
+        op = "" if st.fill_style != "solid" or st.fill.a >= 0.999 else f' fill-opacity="{st.fill.a:.3f}"'
+        svg.body.append(f'<polygon points="{_pts(pts)}" fill="{fill}"{op} stroke="none"/>')
+    if st.stroke is None or st.width <= 0:
+        return
+    seq = pts + ([pts[0]] if closed else [])
+    dense = []
+    for i in range(len(seq) - 1):
+        (x0, y0), (x1, y1) = seq[i], seq[i + 1]
+        n = max(1, int(math.hypot(x1 - x0, y1 - y0) / 36))
+        for k in range(n):
+            dense.append((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n))
+    dense.append(seq[-1])
+    amp = min(1.8, 0.6 + st.width * 0.3)
+    for _ in range(2):
+        jit = [(x + rnd.uniform(-amp, amp), y + rnd.uniform(-amp, amp)) for x, y in dense]
+        svg.body.append(f'<polyline points="{_pts(jit)}" fill="none" {_paint("stroke", st.stroke)} '
+                        f'stroke-width="{st.width * 0.8:.2f}" stroke-linecap="round" stroke-linejoin="round"/>')
+    if isinstance(s, Arrow):
+        l, r = arrow_tip_lines(s.start, s.tip, st.width)
+        svg.body.append(f'<path d="M{l[0]:.2f},{l[1]:.2f} L{s.tip[0]:.2f},{s.tip[1]:.2f} L{r[0]:.2f},{r[1]:.2f}" fill="none" '
+                        f'{_paint("stroke", st.stroke)} stroke-width="{st.width:.2f}" stroke-linecap="round"/>')
+
+
+def element_svg(svg: _Svg, e, index: int = 0) -> None:
     b = svg.body
+    if isinstance(e, ShapeEl) and e.style.rough:
+        _rough_svg(svg, e, index + 1)
+        return
     if isinstance(e, ShapeEl):
         s, st = e.shape, e.style
         if isinstance(s, Rect):
@@ -238,10 +304,8 @@ def document_svg(doc: Document, show_pages: bool = True, pad: float = 0.0) -> st
         bg.append(_pattern(page, x0, y0, w, h))
     # Rnote draws images first, then highlighter strokes, then everything else
     order = {"image": 0, "highlighter": 1, "user": 2}
-    for e in sorted(doc.elements, key=lambda e: order.get(e.layer, 2)):
-        if isinstance(e, PenEl) and e.highlighter:
-            pass
-        element_svg(svg, e)
+    for i, e in enumerate(sorted(doc.elements, key=lambda e: order.get(e.layer, 2))):
+        element_svg(svg, e, i)
     defs = "<defs>" + "".join(svg.defs.values()) + "</defs>" if svg.defs else ""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
             f'width="{w:.0f}" height="{h:.0f}" viewBox="{x0:.2f} {y0:.2f} {w:.2f} {h:.2f}">'

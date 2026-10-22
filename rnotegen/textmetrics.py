@@ -8,6 +8,10 @@ keeps labels inside their boxes and keeps flowing content from overlapping.
 
 from __future__ import annotations
 
+import functools
+import os
+import shutil
+import subprocess
 import unicodedata
 from dataclasses import dataclass
 
@@ -31,6 +35,80 @@ MONO_WIDTH = 0.61
 # desktop fonts (Inter/Adwaita Sans, Noto Sans, Cantarell) render ~5% narrower
 # than the DejaVu-based estimate, so centering uses this factor.
 CENTER_WIDTH_FACTOR = 0.95
+
+# When fontconfig and Pillow are available, text is measured with the fonts
+# installed on this machine (the ones Rnote will most likely use). Widths get
+# a small safety margin for hinting/kerning differences.
+REAL_FONT_SAFETY = 1.03
+
+
+class _RealFont:
+    def __init__(self, font):
+        self.font = font
+        self.cache: dict[str, float] = {}
+
+    def em(self, ch: str) -> float:
+        w = self.cache.get(ch)
+        if w is None:
+            try:
+                w = self.font.getlength(ch) / 200.0
+            except Exception:
+                w = 0.6
+            eaw = unicodedata.east_asian_width(ch)
+            if eaw in ("W", "F"):
+                w = max(w, 1.0)  # usually rendered by a fallback CJK font
+            elif ord(ch) >= 0x1F000:
+                w = max(w, 1.2)
+            if ch == "\t":
+                w = 2.0
+            self.cache[ch] = w
+        return w
+
+
+def metrics_mode() -> str:
+    """'fonts' when real font metrics are used, else 'table'. Set RNOTEGEN_METRICS=table to force estimates."""
+    return "fonts" if _font_for("sans-serif", False, False) is not None else "table"
+
+
+@functools.lru_cache(maxsize=128)
+def _font_for(family: str, bold: bool, italic: bool):
+    if os.environ.get("RNOTEGEN_METRICS", "auto").lower() in ("table", "off", "estimate", "0", "no"):
+        return None
+    exe = shutil.which("fc-match")
+    if not exe:
+        return None
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+    pat = family + (":weight=bold" if bold else "") + (":slant=italic" if italic else "")
+    try:
+        path = subprocess.run([exe, "-f", "%{file}", pat], capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        return _RealFont(ImageFont.truetype(path, 200))
+    except Exception:
+        return None
+
+
+def width_fn(family: str, bold: bool = False, mono: bool = False):
+    """Returns ch -> width in em for the given font."""
+    fam = "monospace" if mono else family
+    rf = _font_for(fam, bold, False)
+    if rf is not None:
+        return lambda ch: rf.em(ch) * REAL_FONT_SAFETY
+    cls = "mono" if mono else family_class(family)
+    return lambda ch: char_width(ch, cls, bold)
+
+
+def center_factor(family: str = "sans-serif") -> float:
+    """Expected rendered width / estimated width (used to center text)."""
+    if _font_for("monospace" if family_class(family) == "mono" else family, False, False) is not None:
+        return 1.0 / REAL_FONT_SAFETY
+    return CENTER_WIDTH_FACTOR
 
 GENERIC_FAMILIES = {
     "sans": "sans-serif", "sans-serif": "sans-serif", "sansserif": "sans-serif", "sans_serif": "sans-serif",
@@ -89,13 +167,10 @@ class Run:
 
 
 def measure_runs(runs: list[Run], family: str, size: float, bold: bool = False) -> float:
-    cls = family_class(family)
     total = 0.0
     for run in runs:
-        rcls = "mono" if run.mono else cls
-        rs = run.size or size
-        rb = bold or run.bold
-        total += sum(char_width(c, rcls, rb) for c in run.text) * rs
+        fn = width_fn(family, bold or run.bold, run.mono)
+        total += sum(fn(c) for c in run.text) * (run.size or size)
     return total
 
 
@@ -118,12 +193,12 @@ def wrap_ranges(
     (trailing spaces and the newline are excluded). char_bold / char_mono
     optionally mark characters that render bold / monospace.
     """
-    cls = family_class(family)
+    fns = {(b, m): width_fn(family, b, m) for b in (False, True) for m in (False, True)}
 
     def cw(i: int, c: str) -> float:
         b = bold or (char_bold[i] if char_bold else False)
         m = char_mono[i] if char_mono else False
-        return char_width(c, "mono" if m else cls, b) * size
+        return fns[(b, m)](c) * size
 
     out: list[tuple[int, int, float]] = []
     base = 0

@@ -15,7 +15,7 @@ from .model import (
     Arrow, BBox, CubBez, Element, Ellipse, Line, Point, Polygon, Polyline, Rect, ShapeEl, Style, TextEl,
     bbox_of_points,
 )
-from .textmetrics import CENTER_WIDTH_FACTOR, LINE_HEIGHT, measure_text
+from .textmetrics import LINE_HEIGHT, center_factor, measure_text
 
 CENTER_LINE_HEIGHT = 1.2  # used to vertically center text; real fonts are ~1.17-1.36
 
@@ -139,10 +139,12 @@ def label_at(text: str, cx: float, cy: float, spec: TextSpec, max_width: float |
     widest line because Rnote anchors centered text at its left edge.
     """
     plain, spans = prepare_text(text, spec.markup)
-    w, _, lines = measure_label(text, spec, max_width)
+    # measure with the same slack as the wrap width given to Rnote, so a label that was
+    # measured to fit on one line is never split by rounding
+    w, _, lines = measure_label(text, spec, max_width + 4 if max_width else None)
     h = lines * spec.size * CENTER_LINE_HEIGHT
     wrap = (max_width if max_width else w) + 4  # slack so Pango never wraps earlier than estimated
-    x = cx - w * CENTER_WIDTH_FACTOR / 2 if align == "center" else cx
+    x = cx - w * center_factor(spec.font) / 2 if align == "center" else cx
     return TextEl(plain, x, cy - h / 2, font=spec.font, size=spec.size, color=spec.color,
                   weight=700 if spec.bold else 400, italic=spec.italic, max_width=wrap,
                   align=align, spans=spans)

@@ -285,8 +285,10 @@ def _read_body(lines: list[str], i: int, st: Stmt) -> tuple[list[str], int, int]
     k = i
     while k < len(lines) and not lines[k].strip():
         k += 1
-    if k < len(lines) and re.match(r"^\s*(```|~~~)", lines[k]):
-        fence = lines[k].strip()[:3]
+    m_f = re.match(r"^\s*(```|~~~)\s*([\w+-]*)", lines[k]) if k < len(lines) else None
+    # a Markdown body may itself start with a code block; only ```md / ```markdown wraps it
+    if m_f and (st.cmd != "markdown" or m_f.group(2).lower() in ("md", "markdown")):
+        fence = m_f.group(1)
         body = []
         j = k + 1
         while j < len(lines) and not lines[j].strip().startswith(fence):

@@ -25,7 +25,7 @@ from .model import (
     PATTERNS, PenEl, Point, Polygon, Polyline, QuadBez, Rect, ShapeEl, Style, TextEl, VectorImageEl, mm_to_px,
     union_all,
 )
-from .textmetrics import CENTER_WIDTH_FACTOR, LINE_HEIGHT, resolve_family
+from .textmetrics import LINE_HEIGHT, center_factor, resolve_family
 
 UNITS = {"px": 1.0, "mm": 96 / 25.4, "cm": 96 / 2.54, "in": 96.0, "pt": 96 / 72}
 _LEN_RE = re.compile(r"^([-+]?(?:\d+\.?\d*|\.\d+))\s*(px|mm|cm|in|pt|%)?$", re.I)
@@ -107,6 +107,7 @@ class Ctx:
     paged: bool
     placed_on_page: bool = False
     after_list: bool = False  # the previous flow element was a list item (tighter spacing)
+    pending_heading: tuple | None = None  # (elements, top y, height) of a heading not yet followed by content
 
 
 class Opts:
@@ -213,6 +214,8 @@ class Builder:
         self.min_pages = 1
         self.last_known: tuple[str, ...] = ()
         self.start_y: float | None = None  # where flow content starts (used when appending to a file)
+        self.cur_line = 0
+        self.shape_entries: list[Entry] = []
         self.ctx: Ctx = self._top_ctx()
         self._adapt_to_background()
         self.ctx_stack: list[Ctx] = []
@@ -295,6 +298,7 @@ class Builder:
             self.errors.append(ScriptError(st.line, f"command '{st.cmd}' is not implemented"))
             return
         o = Opts(st, self)
+        self.cur_line = st.line
         try:
             handler(st, o)
             o.finish()
@@ -331,11 +335,11 @@ class Builder:
                 raise ScriptError(line, f"unknown anchor '.{anchor}'",
                                   "use one of: topleft top topright left center right bottomleft bottom bottomright")
             if m.group(3):
-                off = m.group(4).split(",")
+                # the sign belongs to dx only: a.bottom-70,20 means dx=-70, dy=+20
+                off = (m.group(3) + m.group(4)).split(",")
                 if len(off) != 2:
-                    raise ScriptError(line, f"bad offset in {s!r}; write it like {m.group(1)}.{anchor}+10,20")
-                sign = 1 if m.group(3) == "+" else -1
-                p = (p[0] + sign * self.length(off[0], line, "x"), p[1] + sign * self.length(off[1], line, "y"))
+                    raise ScriptError(line, f"bad offset in {s!r}; write it like {m.group(1)}.{anchor}+10,20 or {m.group(1)}.{anchor}-10,-20")
+                p = (p[0] + self.length(off[0], line, "x"), p[1] + self.length(off[1], line, "y"))
             return p
         if m:
             near = difflib.get_close_matches(m.group(1), list(self.ids), n=1)
@@ -371,6 +375,9 @@ class Builder:
             self.src_line[id(e)] = st.line
         self.ctx.out.extend(els)
         ent = Entry(els, st.line, shape)
+        if shape is not None and not self.ctx_stack:
+            self.shape_entries.append(ent)
+        self.ctx.pending_heading = None
         if o is not None and register:
             ident = o.raw("id", "name")
             if ident:
@@ -462,20 +469,34 @@ class Builder:
             y = top + m
         limit = top + ph - m
         if y + h > limit and h <= ph - 2 * m + 0.5 and y > top + m + 1:
-            y = (idx + 1) * ph + m
-            c.cursor = y
-            c.placed_on_page = False
+            left = limit - y
+            y = self._new_page_y()
+            if left > 0.35 * (ph - 2 * m):
+                self.warn(self.cur_line, f"this did not fit on the page and moved to the next one, leaving {left:.0f}px "
+                                         f"empty (make it smaller with height=/scale=/width=, or accept the gap)")
+        return y
+
+    def _new_page_y(self) -> float:
+        """Move the flow to the top of the next page, taking a just-placed heading along."""
+        c = self.ctx
+        page = self.doc.page
+        idx = max(0, math.floor((c.cursor - 0.001) / page.height))
+        y = (idx + 1) * page.height + page.margin
+        if c.pending_heading is not None:
+            els, top, height = c.pending_heading
+            if math.floor(top / page.height) == idx:
+                for e in els:
+                    e.translate(0, y - top)
+                y += height
+            c.pending_heading = None
+        c.cursor = y
+        c.placed_on_page = y > (idx + 1) * page.height + page.margin + 1
         return y
 
     def break_page(self) -> None:
         """Continue the flow at the top of the next page."""
-        c = self.ctx
-        if not c.paged:
-            return
-        page = self.doc.page
-        idx = max(0, math.floor((c.cursor - 0.001) / page.height))
-        c.cursor = (idx + 1) * page.height + page.margin
-        c.placed_on_page = False
+        if self.ctx.paged:
+            self._new_page_y()
 
     def _keep_together(self, h: float) -> None:
         """Move to the next page if a block of height h does not fit here but is short enough to keep whole."""
@@ -699,6 +720,7 @@ class Builder:
             return
         c.cursor = (idx + 1) * ph + self.doc.page.margin
         c.placed_on_page = False
+        c.pending_heading = None
         if not self.ctx_stack:
             c.ox, c.oy = 0.0, (idx + 1) * ph
         self.min_pages = max(self.min_pages, idx + 2)
@@ -732,6 +754,14 @@ class Builder:
         align = (o.raw("text_align", "justify_text") or o.st.kw.get("align", Token("left")).value).lower()
         angle = o.num("rotate", "rotation", "angle", default=0.0)
         wrap = o.num("width", "max_width", "wrap", "w")
+        raw_origin = o.raw("text_origin")
+        if raw_origin is not None:
+            # the stored Rnote text position, no alignment adjustment (used by decompiled scripts)
+            p = self.point(raw_origin, st.line, "text_origin")
+            el = self.make_text(text, p[0], p[1], spec, wrap, align, angle)
+            o.raw("align")
+            self.emit(st, [el], o)
+            return
         explicit = o.has("at", "center", "centre", "middle", "below", "above", "right_of", "left_of", "x", "y",
                          "pos", "position", "under", "over", "rightof", "leftof", "c", "xy")
         if not explicit:
@@ -743,14 +773,18 @@ class Builder:
             o.raw("align")
             y = self.flow_y(h)
             el.y = y
-            el.x = self._aligned_x(c.col_x, wrap, w, align)
+            el.x = self._aligned_x(c.col_x, wrap, w, align, spec["font"])
             self.emit(st, [el], o, flow=True)
             return
         el = self.make_text(text, 0, 0, spec, wrap, align, angle)
         est_w, h, _ = el.measure()
-        vis_w = est_w * (CENTER_WIDTH_FACTOR if align in ("center", "centre", "middle", "right", "end") else 1.0)
-        x, y, _ = self.place(o, vis_w, h, need_flow_ok=True, align=align)
-        el.x, el.y = x, y
+        a = ALIGNMENTS.get(align, "start")
+        vis_w = est_w * (center_factor(spec["font"]) if a in ("center", "end") else 1.0)
+        # with width=, the position refers to the whole text box and the text is aligned inside it
+        box_w = wrap if wrap else vis_w
+        x, y, _ = self.place(o, box_w, h, need_flow_ok=True, align=align)
+        el.x = self._aligned_x(x, box_w, est_w, align, spec["font"]) if wrap else x
+        el.y = y
         if wrap is None:
             page_w = self.doc.page.width
             room = page_w - self.doc.page.margin / 2 - x
@@ -760,12 +794,18 @@ class Builder:
         o.raw("align")
         self.emit(st, [el], o)
 
-    def _aligned_x(self, col_x: float, col_w: float, text_w: float, align: str) -> float:
+    def _aligned_x(self, col_x: float, col_w: float, text_w: float, align: str, font: str = "sans-serif") -> float:
+        """Left edge for text of estimated width text_w aligned inside [col_x, col_x + col_w].
+
+        Rnote positions centered/right-aligned text by its left edge, so the
+        alignment has to be done here.
+        """
         a = ALIGNMENTS.get(align, "start")
+        f = center_factor(font)
         if a == "center":
-            return col_x + (col_w - text_w * CENTER_WIDTH_FACTOR) / 2
+            return col_x + (col_w - text_w * f) / 2
         if a == "end":
-            return col_x + col_w - text_w * CENTER_WIDTH_FACTOR
+            return col_x + col_w - text_w * f
         return col_x
 
     def cmd_para(self, st: Stmt, o: Opts) -> None:
@@ -790,7 +830,7 @@ class Builder:
             if keep is None:
                 keep = self.d.size * LINE_HEIGHT * 3  # keep with the next lines
             y = self.flow_y(h + self.d.gap + keep)
-            el.x, el.y = self._aligned_x(c.col_x, c.col_w, w, align), y
+            el.x, el.y = self._aligned_x(c.col_x, c.col_w, w, align, spec["font"]), y
         els: list[Element] = [el]
         if o.flag("rule", "line", "underline_bar") or (level == 1 and o.flag("hr")):
             ly = el.y + h + 4
@@ -798,6 +838,8 @@ class Builder:
                                Style(stroke=spec["color"].with_alpha(0.5), width=1.5)))
         self.emit(st, els, o)
         c.cursor -= self.d.gap * 0.4
+        if not explicit:
+            c.pending_heading = (els, el.y, c.cursor - el.y)
 
     def cmd_h1(self, st, o):
         self._heading(st, o, 1)
@@ -1437,6 +1479,13 @@ class Builder:
             if h * scale > room:
                 scale = room / h
                 self.warn(st.line, f"diagram scaled to {scale:.0%} to fit on one page")
+            left = self.page_room() - self.d.gap
+            if not explicit and not o.has("scale", "zoom") and left < h * scale <= left / 0.75 and not self.at_page_top():
+                scale = left / h  # shrink a little rather than leave a big gap
+                self.warn(st.line, f"diagram shrunk to {scale:.0%} to fit the rest of the page (set height= or scale= to control)")
+        if scale < 0.6:
+            self.warn(st.line, f"diagram drawn at {scale:.0%} of its natural size; text may be small "
+                               "(try direction=TB, fewer/shorter labels, or a landscape page)")
         x, y, _ = self.place(o, w * scale, h * scale, align="center")
         for e in dg.elements:
             e.transform(scale, x, y)
@@ -1658,10 +1707,10 @@ class Builder:
                     el.y = yy + pad - 2
                     inner = widths[k] - 2 * pad
                     if al == "center":
-                        el.x = xx + pad + (inner - w_ * CENTER_WIDTH_FACTOR) / 2
+                        el.x = xx + pad + (inner - w_ * center_factor(spec["font"])) / 2
                         el.align = "center"
                     elif al == "right":
-                        el.x = xx + pad + inner - w_ * CENTER_WIDTH_FACTOR
+                        el.x = xx + pad + inner - w_ * center_factor(spec["font"])
                         el.align = "end"
                     else:
                         el.x = xx + pad
@@ -1778,6 +1827,28 @@ class Builder:
                 self.warnings.append(f"line {ln}: element crosses a page boundary (y {bb.y0:.0f}..{bb.y1:.0f})")
                 reported += 1
             if reported > 12:
+                break
+        shapes = self.shape_entries
+        n_ov = 0
+        for i in range(len(shapes)):
+            a = shapes[i].bbox()
+            for j in range(i + 1, len(shapes)):
+                b = shapes[j].bbox()
+                if not a.intersects(b, tol=1.0):
+                    continue
+                contains = (a.x0 <= b.x0 and a.y0 <= b.y0 and a.x1 >= b.x1 and a.y1 >= b.y1) or \
+                           (b.x0 <= a.x0 and b.y0 <= a.y0 and b.x1 >= a.x1 and b.y1 >= a.y1)
+                if contains:
+                    continue
+                ix = min(a.x1, b.x1) - max(a.x0, b.x0)
+                iy = min(a.y1, b.y1) - max(a.y0, b.y0)
+                if ix * iy > 0.05 * min(a.w * a.h, b.w * b.h):
+                    self.warnings.append(f"lines {shapes[i].line} and {shapes[j].line}: shapes overlap "
+                                         f"({ix:.0f}x{iy:.0f}px)")
+                    n_ov += 1
+                    if n_ov >= 8:
+                        break
+            if n_ov >= 8:
                 break
         texts = [e for e in els if isinstance(e, TextEl)]
         n = 0

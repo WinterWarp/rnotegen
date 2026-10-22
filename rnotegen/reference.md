@@ -6,8 +6,10 @@ pen strokes.
 
 Workflow: write a script, then run `rnotegen build notes.rns -o notes.rnote -p preview.png`
 (or the `rnote_build` MCP tool). Read the report: errors carry line numbers,
-warnings flag text overlaps and content off the page, and every `id=` is
-listed with its position. Look at the preview, fix, and rebuild.
+warnings flag overlapping text or shapes, content off the page and large
+page gaps, and every `id=` is listed with its position. Look at the preview,
+fix, and rebuild. The preview shows all pages stacked in one tall image,
+with dashed lines at page boundaries. Gray areas are outside the page.
 
 ## 1. Syntax basics
 
@@ -56,7 +58,9 @@ paragraphs, lists and diagrams.
 
 **References:** give an element `id=name` (letters, digits, `_`), then use
 `name` (its center) or `name.ANCHOR` anywhere a point is expected, optionally
-with an offset: `title.bottomleft+0,20`, `box1.right+30,0`, `box1.top-0,10`.
+with an offset `+dx,dy` or `-dx,dy` (each number has its own sign): `title.bottomleft+0,20`
+(20 px below), `box1.right+30,0` (30 px to the right), `box1.top+0,-10` (10 px above),
+`box1.bottom-70,40` (70 px left, 40 px down).
 Anchors: `topleft top topright left center right bottomleft bottom bottomright`.
 
 Explicitly placed elements also push the flow cursor below them, so flow
@@ -115,6 +119,12 @@ Text options: `size=` `font=` `color=` `bold` `italic` `underline` `strike`
 `weight=` (100-900) `align=left|center|right|justify` `width=` (wrap width)
 `rotate=DEG` `raw` (turns off inline markup) `opacity=`.
 
+**Centering text exactly:** use `center=X,Y` (the text's middle goes to X,Y), or
+`at=X,Y width=W align=center` (the text is centered inside the W-wide box that
+starts at X). Without `width=`, `align=` only affects how multiple lines line
+up with each other. In the flow, `align=center` centers on the page.
+`text_origin=X,Y` sets Rnote's raw text position (used by `rnotegen decompile`).
+
 **Inline markup** inside any text: `**bold**`, `*italic*`, `_italic_`,
 `~~strike~~`, `` `code` ``, `<u>underline</u>`, `<color=red>red text</color>`,
 `[link text](https://...)`. Use `\*` for a literal asterisk.
@@ -126,7 +136,7 @@ rect 100,100 200x80                       # top-left + size
 rect 100,100 300,180                      # two corners
 rect at=100,100 size=200x80 fill=lightyellow stroke=orange radius=10 label="Inside"
 ellipse center=300,300 radius=80,40
-circle center=300,300 radius=40 fill=gold label="A"
+circle center=300,300 radius=40 fill=gold label="A" text_color=red font_size=24 bold
 circle 300,300 40                         # center + radius
 line 100,100 300,100                      # 2 points = line
 line 100,100 200,150 300,100 dashed       # 3+ points = polyline
@@ -140,8 +150,10 @@ pen 100,500 120,510 140,505 160,520 smooth color=blue width=3   # freehand strok
 highlight 100,540 300,540                 # translucent highlighter (yellow by default)
 ```
 
-Line-like commands (`line arrow curve bezier pen`) take `width=` as the
-stroke width. Arrow heads (`head=` for the end, `tail=` for the start):
+`label=` on `rect`, `ellipse`, `circle` and `polygon` puts centered text
+inside; it takes the text options `text_color=`, `font_size=`, `bold`,
+`italic`, `font=`. Line-like commands (`line arrow curve bezier pen`) take
+`width=` as the stroke width. Arrow heads (`head=` for the end, `tail=` for the start):
 `arrow` (Rnote's native arrow), `triangle`, `triangle_open`, `diamond`,
 `diamond_open`, `circle`, `circle_open`, `cross`, `bar`, `none`.
 `arrow=start|end|both|none` also works on `line`.
@@ -154,7 +166,7 @@ stroke width. Arrow heads (`head=` for the end, `tail=` for the start):
 | `fill=` | fill color (default none) |
 | `stroke_width=` | line width in px (default 2) |
 | `dash=` | `solid` `dashed` `dotted` `dashed_narrow` `dashed_wide` (flags `dashed`, `dotted` too) |
-| `rough` | hand-drawn look (Rnote's rough style) |
+| `rough` | hand-drawn look (Rnote's rough style). Works on every shape, box and connector; `defaults rough=on` turns it on for everything, `mermaid rough` for a diagram |
 | `fill_style=` | `hachure` `crosshatch` `zigzag` `zigzag_line` `dots` `dashed` (turns on rough) |
 | `opacity=` | 0..1, applied to stroke and fill |
 | `rotate=` | degrees (rect, ellipse, text) |
@@ -173,6 +185,8 @@ connect check -> err "no"
 connect err -> start route=elbow dashed
 ```
 
+- `callout "text"`: a highlighted note box in the flow. Options: `title=`,
+  `fill=`, `stroke=`, `width=`, `id=`, and the placement options.
 - `box "Label"`: a shape with centered text that sizes itself to fit unless
   you give `size=WxH`, `width=` or `height=`. `shape=` rect (default) round stadium
   ellipse circle doublecircle diamond hexagon parallelogram parallelogram_alt
@@ -246,7 +260,10 @@ end
   Options: `width=` / `height=` / `scale=` / `max_width=`, `theme=`
   default|neutral|forest|blue|ink|sketch, `rough`, `curved`,
   `direction=LR` (override), `font=`, `font_size=`, `wrap=` (label width).
-  In the flow, a diagram is centered and shrunk to fit the page width.
+  In the flow, a diagram is centered and shrunk to fit the page width. If it
+  is too tall for the rest of the page, it shrinks by up to 25% to fit, or
+  else moves to the next page. The heading before it moves along, and you
+  get a warning if a large gap is left. `height=` controls the size directly.
   Mermaid's own `subgraph ... end` lines are fine inside the block; the block ends at the
   first `end` that does not close a subgraph/loop/alt.
 - `markdown` supports headings, paragraphs, `-`/`*`/`1.` lists (nested by
@@ -264,8 +281,9 @@ end
    (`below=`, `right_of=`, `connect`) instead of computing coordinates.
 3. Keep exact coordinates inside the page: x from 56 to 738 and y from 56 to
    1067 on A4 (inside the margins).
-4. Text widths are estimates (fonts vary between systems). Leave some room,
-   or set `width=` so that text wraps.
+4. Text widths are measured with the fonts installed on this machine when
+   Pillow and fontconfig are available; otherwise they are slightly
+   generous estimates. Leave some room, or set `width=` so that text wraps.
 5. Read the warnings after each build. They tell you which line overlaps or
    overflows.
 6. Images are always drawn below strokes and text (Rnote's layer order).
