@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rnotegen"
+version = "0.1.0"
+description = "Create Rnote (.rnote) documents from an LLM-friendly script, Markdown or Mermaid diagrams"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+images = ["Pillow>=9"]
+png = ["cairosvg>=2.5"]
+test = ["pytest>=7"]
+
+[project.scripts]
+rnotegen = "rnotegen.cli:main"
+
+[tool.setuptools]
+packages = ["rnotegen", "rnotegen.mermaid"]
+
+[tool.setuptools.package-data]
+rnotegen = ["reference.md"]
