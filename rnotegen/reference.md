@@ -37,7 +37,7 @@ The default margin is 56 px. Build reports always give positions in px.
 
 **Block commands** take the following lines as their body, up to a line that
 contains only `end`. These are `mermaid`, `markdown`, `table`, `code`, `group`,
-`svg`, and `text`/`para`/`quote`/`callout` when no "string" is given on the
+`svg`, and `text`/`para`/`quote`/`callout`/`math` when no "string" is given on the
 command line. The body may also be wrapped in a ``` fence.
 
 ## 2. Placement: flow or exact
@@ -54,18 +54,26 @@ paragraphs, lists and diagrams.
 | `at=X,Y` | top-left corner at X,Y (change which corner with `anchor=`) |
 | `anchor=NAME` | which point of the element `at=` refers to: `topleft` `top` `topright` `left` `center` `right` `bottomleft` `bottom` `bottomright` |
 | `center=X,Y` | center of the element at X,Y |
-| `x=X` / `y=Y` | set one coordinate; the other comes from the flow |
+| `x=X` / `y=Y` | set one coordinate; the other comes from the flow. With only `x=`, the flow also decides page breaks |
 | `below=ID` `above=ID` `right_of=ID` `left_of=ID` | next to another element, `gap=20` apart by default |
 | `align=left\|center\|right` | with `below`/`above`: which edges to line up (default center) |
-| `align=top\|middle\|bottom` | with `right_of`/`left_of` (default middle) |
+| `align=top\|middle\|bottom\|baseline` | with `right_of`/`left_of` (default middle). `baseline` lines up the first text baselines of text, headings and math |
 | `float` | don't push the flow cursor (use for backgrounds and page frames) |
+
+Give one way of placing an element. If several are given, `at=` wins over
+`center=`, which wins over `below=`/`above=`/`right_of=`/`left_of=`, which win
+over `x=`/`y=`; the build warns that the others are ignored
+(`x= is ignored because at= is set`).
 
 **References:** give an element `id=name` (letters, digits, `_`), then use
 `name` (its center) or `name.ANCHOR` anywhere a point is expected, optionally
 with an offset `+dx,dy` or `-dx,dy` (each number has its own sign): `title.bottomleft+0,20`
 (20 px below), `box1.right+30,0` (30 px to the right), `box1.top+0,-10` (10 px above),
 `box1.bottom-70,40` (70 px left, 40 px down).
-Anchors: `topleft top topright left center right bottomleft bottom bottomright`.
+Anchors: `topleft top topright left center right bottomleft bottom bottomright`, and for
+text, headings and math `baseline` (the left end of the first line's baseline;
+also `baseline_center`, `baseline_right`). `anchor=baseline` works the same way:
+`math "x^2" at=label.baseline+10,0 anchor=baseline` sits on the label's baseline.
 
 Explicitly placed elements also push the flow cursor below them, so flow
 content that follows does not overlap them (unless `float`).
@@ -73,7 +81,15 @@ content that follows does not overlap them (unless `float`).
 **Pages:** `page 2` moves to the top of page 2; from then on, explicit
 coordinates are relative to page 2's top-left corner. `newpage` starts a new
 page in the flow, and coordinates become relative to that page too. Automatic
-page breaks do not change the origin. `space 30` adds vertical space.
+page breaks do not change the origin. `space 30` adds vertical space; it can
+run over a page break. `space 200 keep` keeps the space on one page with the
+block above it: if it does not fit, that block (with a heading right above it)
+moves to the next page together with the space.
+
+**Headings keep with the next block:** when the block after a heading (a
+paragraph, list, table, code, callout, image, group, diagram or math) moves to
+the next page, the heading moves with it, together with one short paragraph
+between them.
 
 ## 3. Commands
 
@@ -91,7 +107,8 @@ defaults font=sans size=16 color=#1e1e1e stroke_width=2 rough=off theme=default
   `borders=on|off`; `pages=N` (minimum page count). It applies to the whole
   file, wherever it appears.
 - `defaults` changes the defaults for the commands that follow: `font=`
-  (sans, serif, mono or a family name), `size=` (font size, default 16),
+  (sans, serif, mono or a family name), `size=` (font size, default 16, also
+  used by `math`), `math_font=` (see Math),
   `color=` (text and lines), `text_color=`, `stroke=`, `fill=`,
   `stroke_width=`, `dash=`, `rough=on|off`, `fill_style=`, `gap=` (flow
   spacing, default 12), `theme=` (diagram theme), `heading_color=`,
@@ -224,6 +241,19 @@ the children as if the group's top-left corner were 0,0. The whole group is
 then placed in the flow (use `align=center` to center it). The group's id
 refers to its bounding box.
 
+`min_height=H` makes the group at least H tall: the blank space below its
+content belongs to the group, so in the flow the group and its space move to
+the next page together. Use it for answer space on worksheets:
+
+```
+repeat 10 n from=1
+  group min_height=180
+    text "Problem {n}" bold
+    math "\int_0^{1} x^2\,dx" at=20,28
+  end
+end
+```
+
 ### Variables and loops
 
 ```
@@ -280,6 +310,16 @@ svg at=500,100 width=120
 end
 ````
 
+- SVG files (`image "plot.svg"`, `svg "file.svg"` or an `svg` block) are
+  cleaned up for Rnote, which renders them nested inside an `<svg>` of its own
+  and would otherwise show an empty box: the XML declaration, DOCTYPE,
+  comments, `<metadata>` and editor data (Inkscape, Illustrator) are removed,
+  `<use>` copies are expanded, CSS (`<style>` and `style=`) becomes plain
+  attributes, and ids get a per-image prefix. Output from matplotlib,
+  Inkscape and most other tools works. Sizes in `pt`, `mm`, `cm`, `in`, `pc`
+  and `px` are converted to px. An SVG that is not valid XML is an error with
+  its line number.
+
 - `mermaid` supports: `flowchart`/`graph` (all node shapes, subgraphs,
   `classDef`/`class`/`style`/`linkStyle`, labeled, dotted, thick and long
   edges), `sequenceDiagram` (actors, notes, loops, alt/else, opt, par,
@@ -302,6 +342,44 @@ end
   `![alt](file.png)` and `<!-- pagebreak -->`. Options: `at=`, `width=`.
 - `table`: Markdown pipe-table rows; `header=off` makes the first row plain.
   Long tables continue on the next page with the header repeated.
+
+### Math
+
+```
+math "\int_0^1 x^2\,dx = \frac{1}{3}"           # TeX, as between $...$
+math "e^{i\pi} + 1 = 0" align=center size=24
+text "a)" at=60,300 id=qa
+math "\sqrt{x^2 + y^2}" right_of=qa align=baseline gap=8   # on the label's baseline
+math "Area: $A = \pi r^2$"                         # text with $...$ math parts
+math font=cm
+\lim_{n \to \infty} \left(1 + \frac{1}{n}\right)^n = e
+end
+```
+
+- Needs matplotlib (`pip install matplotlib`); everything else works without
+  it. The formula is drawn by matplotlib's mathtext as glyph outlines in a
+  transparent vector image: it looks the same everywhere, but it is an
+  image in Rnote, not editable text.
+- Backslashes in the string are kept as written (`\nabla` is not a new
+  line). Inside `repeat`, `{...}` in the formula stays TeX; `{i}` is only
+  replaced in the options (`id=eq{i}`).
+- Options: `size=` (font size; default `defaults size=`), `color=`,
+  `opacity=`, `font=` `sans` (default; `serif` when the text font is serif),
+  `serif`, `cm` (TeX look), `stix`, `stixsans`, all placement options, `id=`.
+  `defaults math_font=cm` sets the font for all formulas.
+- A formula is at least one text line tall, with its baseline where a line of
+  text at the same position has its baseline: `text` and `math` with the
+  same y line up. For taller formulas use `align=baseline` or
+  `anchor=baseline`. In the flow it is left-aligned (`align=center` centers it).
+- mathtext supports most TeX math (fractions, roots, sums, integrals, Greek,
+  accents, `\left( \right)`, `\mathrm`, `\mathbf`, ...) but no environments
+  (`\begin{...}`), no `\\` line breaks and no `\color`.
+- Some TeX renders badly in mathtext; the build fixes it unless you add the
+  flag `raw`: after `\int` (with no limits) a thin space is too small, so it
+  gets `\!\!\!\quad`; after limits (`\int_0^1`) it gets `\ `. `\sin`, `\cos`,
+  `\ln`, ... get a thin space after a letter, digit or closing bracket (`x\sin x`).
+  `\left[ ... \right]_a^b` around content one line high becomes `[\, ... \,]_a^b`.
+  A decimal point before `\overline{...}` loses its extra space (`0.\overline{3}`).
 
 ## 4. Editing existing notes
 
@@ -332,6 +410,10 @@ end
 6. Images are always drawn below strokes and text (Rnote's layer order).
 7. For repeated structures (columns, grids, rows of boxes), use `let` and
    `repeat` instead of computing every coordinate by hand.
+8. For worksheets, put each problem in a `group min_height=...` so that a
+   problem and its answer space are never split across pages.
+9. Use `math` for formulas instead of SVG files made elsewhere: it sizes the
+   formula to the text and lines it up with the text's baseline.
 
 ## 6. Complete example
 

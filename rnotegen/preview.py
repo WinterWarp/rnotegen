@@ -7,7 +7,6 @@ Rnote will put things; exact glyph widths depend on the fonts installed.
 
 from __future__ import annotations
 
-import base64
 import html
 import math
 import os
@@ -21,6 +20,7 @@ from .model import (
     Arrow, BitmapImageEl, CubBez, Document, Ellipse, Line, PenEl, Polygon, Polyline, QuadBez, Rect, ShapeEl, Style,
     TextEl, VectorImageEl, arrow_tip_lines, union_all,
 )
+from .svgnorm import rnote_image_svg
 from .textmetrics import LINE_HEIGHT, wrap_ranges
 
 _DASH = {"solid": [], "dotted": [0.0, 0.0], "dashed_narrow": [1.0, 0.618], "dashed_equidistant": [1.0, 1.0],
@@ -203,8 +203,8 @@ def element_svg(svg: _Svg, e, index: int = 0) -> None:
         b.append(f'<polyline points="{_pts(pts)}" fill="none" {_paint("stroke", e.color)} stroke-width="{e.width:.2f}" '
                  f'stroke-linecap="round" stroke-linejoin="round"/>')
     elif isinstance(e, VectorImageEl):
-        href = "data:image/svg+xml;base64," + base64.b64encode(e.svg.encode("utf-8")).decode("ascii")
-        b.append(f'<image x="{e.x:.2f}" y="{e.y:.2f}" width="{e.w:.2f}" height="{e.h:.2f}" preserveAspectRatio="none" href="{href}"/>')
+        # pasted into the page exactly as Rnote does, so data that breaks in Rnote breaks the preview too
+        b.append(rnote_image_svg(e.svg, e.x, e.y, e.w, e.h, e.intrinsic))
     elif isinstance(e, BitmapImageEl):
         if e.preview_href:
             b.append(f'<image x="{e.x:.2f}" y="{e.y:.2f}" width="{e.w:.2f}" height="{e.h:.2f}" preserveAspectRatio="none" href="{e.preview_href}"/>')
@@ -307,7 +307,8 @@ def document_svg(doc: Document, show_pages: bool = True, pad: float = 0.0) -> st
     for i, e in enumerate(sorted(doc.elements, key=lambda e: order.get(e.layer, 2))):
         element_svg(svg, e, i)
     defs = "<defs>" + "".join(svg.defs.values()) + "</defs>" if svg.defs else ""
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg" '
+            f'xmlns:xlink="http://www.w3.org/1999/xlink" '
             f'width="{w:.0f}" height="{h:.0f}" viewBox="{x0:.2f} {y0:.2f} {w:.2f} {h:.2f}">'
             + defs + "".join(bg) + "".join(svg.body) + "</svg>")
 

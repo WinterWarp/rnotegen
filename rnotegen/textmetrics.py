@@ -104,6 +104,22 @@ def width_fn(family: str, bold: bool = False, mono: bool = False):
     return lambda ch: char_width(ch, cls, bold)
 
 
+# Rnote (Pango) puts a text's first baseline one font ascent below its top. Ascents of
+# common fonts range from 0.93 em (DejaVu) to 1.07 em (Noto Sans).
+ASCENT = 0.95
+
+
+def baseline_offset(family: str, size: float, bold: bool = False) -> float:
+    """Distance from the top of a text element to its first baseline."""
+    rf = _font_for("monospace" if family_class(family) == "mono" else family, bold, False)
+    if rf is not None:
+        try:
+            return rf.font.getmetrics()[0] / 200.0 * size
+        except Exception:
+            pass
+    return ASCENT * size
+
+
 def center_factor(family: str = "sans-serif") -> float:
     """Expected rendered width / estimated width (used to center text)."""
     if _font_for("monospace" if family_class(family) == "mono" else family, False, False) is not None:
